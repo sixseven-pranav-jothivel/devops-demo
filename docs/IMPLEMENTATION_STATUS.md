@@ -52,7 +52,7 @@ but were not re-run here), and `make perf`.
 - [x] coverage 100.00 % branch, floor 85 enforced by `make test-coverage` and mirrored in the policy
 - [x] scripts/smoke_test.py (exercised against the container)
 - [x] load-tests (`performance.js`, `smoke.js`); `slow_api` verification drives k6 successfully
-- [ ] Load test against the real Render service (`perf.yml`): **NOT VERIFIED** (a service exists now, but the workflow has not been run)
+- [x] Load test against the real Render service (`perf.yml`, run 38214612234, reported by the orchestrator): 10 VUs, p95 104.05 ms (< 500), failed 0.00 % (< 1 %), checks 3136/3136; first attempt 38214572952 failed fast (no `environment:` in perf.yml, so `STOCKFLOW_BASE_URL` must be a repository variable; now set)
 
 ## Phase 5 - Quality policy and security (security)
 - [x] config/quality-policy.yaml + scripts/quality_policy.py (`check` passes)
@@ -85,8 +85,11 @@ but were not re-run here), and `make perf`.
 - [x] Dependabot PRs: pr-preview skipped (guard OK on real events); PRs #1 and #2 reviewed and merged
 - [x] `demo-fixtures.yml` manual dispatch passed (run 38211082924); CI uv pin 0.13.0 aligned with the image (commit 04b0535)
 - [x] GitHub configuration verified: branch protection requiring `quality-gate`; environments `production` (main only), `demo-unsafe` (reviewer) and `preview`; secrets set
-- [ ] **NOT VERIFIED**: fork-PR guard on a real fork event; `gate` timeout; red-gate path (failing `quality-gate`); supersede-during-deploy branch; cleanup-race branches other than closed-while-unlabeled; `rollback.yml`; `demo-unsafe-deploy.yml`; `perf.yml`; the scheduled (cron) run of `demo-fixtures.yml`
-- [ ] Other inherited base-service env vars on previews: **NOT VERIFIED** (none known to be set). Remove `DEPLOY_ENVIRONMENT=production` from `render.yaml` (devops) so a Blueprint-created base cannot override `preview-pr-<n>`; review any variable added later before opening previews to more contributors
+- [x] `rollback.yml` (run 38213914551, reported by the orchestrator): digest `sha256:bb0c581d...` (first published image, 0.1.0, commit f350a66); `verify-image` passed, `rollback` redeployed that digest via the hook with no rebuild, smoke test passed against the restored sha, live `/api/version` went ff14573 -> f350a66 in ~2 min; the next push's release restored 132e4ae
+- [x] `perf.yml` verified (see Phase 4)
+- [x] Observed failure modes recorded in ARCHITECTURE 10.1: Render Free-plan stalled deploy (release run 38211027004: "Timed Out" after ~18 min, old instance gone, pipeline went red, next deploy recovered in 22 s); rapid back-to-back pushes cancel the earlier release run
+- [ ] **NOT VERIFIED**: `demo-unsafe-deploy.yml` (needs a manually pushed broken image and `demo-unsafe` approval); fork-PR guard on a real fork event; `gate` timeout; red-gate path (failing `quality-gate`); supersede-during-deploy branch; the scheduled (cron) run of `demo-fixtures.yml`; a paid `PREVIEW_PLAN`
+- [ ] Other inherited base-service env vars on previews: **NOT VERIFIED** (none known to be set). `render.yaml` no longer sets `DEPLOY_ENVIRONMENT` (commit 132e4ae); review any variable added later before opening previews to more contributors
 - [ ] SHA pins verified against the GitHub API by the architect: not done (devops/security responsibility)
 
 ## Phase 8 - Defect injection (demo-engineer)
@@ -110,5 +113,5 @@ but were not re-run here), and `make perf`.
       performed inside `demo verify-all` (`clean` scenario, PASS in 435 s), not separately by the architect
 - [ ] Trivy image gate on the final tarball per policy: earlier devops run only, not re-run here
 - [x] actionlint clean; [ ] action SHA pins verified against the GitHub API by the architect: not done
-- [x] First real release to GitHub/Render: done (see Phase 7). [ ] Rollback rehearsal (`rollback.yml`): **NOT VERIFIED**
+- [x] First real release to GitHub/Render: done (see Phase 7). [x] Rollback rehearsal (`rollback.yml`, run 38213914551)
 - [ ] Open questions resolved by the project owner (public GHCR package, demo-unsafe environment reviewers, Render plan)

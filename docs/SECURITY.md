@@ -135,7 +135,7 @@ A new write permission requires a policy change plus a justification in the PR.
 | `RENDER_SERVICE_ID` | secret, **optional** | same environments | same step | identifier (`srv-...`), validated against `[A-Za-z0-9_-]{3,64}`; treated as a secret only to keep it out of logs |
 | `RENDER_API_KEY`, `RENDER_SERVICE_ID` (preview) | secrets | **environment `preview`** only (it holds its OWN copies of the values: GitHub environment secrets cannot be read back or copied between environments) | `preview` and `cleanup` jobs of `pr-preview.yml` via `scripts/deploy/preview_tools.py` (create / find / redeploy / delete previews of the base service) | Here the key is **not** read-only: it creates and deletes services. Render keys are not scopable. **Observed 2026-10-12: the `preview` environment uses the same Render key value as `production`, i.e. an account-wide key that can reach the production service.** The recommended dedicated preview workspace and user (10.9 item 5) is **OPEN / not done**; this is an accepted risk (10.10) |
 | `PREVIEW_PLAN` | variable, optional | environment `preview` | `preview` job | validated against `^[a-z0-9][a-z0-9_.-]{0,31}$`; unset = the base service's plan |
-| `STOCKFLOW_BASE_URL` | variable | repository or environment | preflight, smoke, perf | public URL, not secret |
+| `STOCKFLOW_BASE_URL` | variable (non-secret) | **repository-level** (observed 2026-10-12: `perf.yml` has no `environment:`, so it can only read a repository variable; `production` / `demo-unsafe` may override it with an environment variable) | preflight, smoke, perf | public URL, not secret |
 | `GITHUB_TOKEN` | automatic, per job | per job, see 4 | GHCR login: write in `publish` only; read in `verify-image`/`guard` | no PAT is used by any workflow |
 | (none) | - | - | the application | no API keys, DB credentials or signing keys exist; `REPOSITORY_BACKEND=memory` |
 
@@ -450,15 +450,12 @@ Re-audit of 2026-10-11 after the `release.yml` / `deploy_lib.py` / `release_tool
   tarball sha256 is verified between `build-scan` and `publish`, and `md_safe` (`deploy_lib.py:549`) sanitises
   free text written to step summaries.
 
-Open findings for devops (not in security's ownership):
-1. **LOW, `scripts/deploy/deploy_lib.py:138-143` (`default_opener`) and `:230-236` (`RenderApi._get`)**:
-   `urllib` follows redirects and re-sends custom headers, including `Authorization: Bearer <RENDER_API_KEY>`,
-   to the redirect target (possibly another host). Use an opener built with a `HTTPRedirectHandler` subclass
-   that refuses redirects (raise `DeployError`) for authenticated GETs, or drop `Authorization` when the host
-   changes. The same opener also POSTs the hook URL; refuse redirects there as well.
-2. **LOW, `scripts/deploy/deploy_lib.py:381`**: the error text says `STOCKFLOW_BASE_URL must start with
-   https://` but the check accepts `http://` as well (as does `fetch_version`, line 338). For a mandatory
-   production verification require `https://` (allow `http://localhost` only via an explicit flag).
+Findings for devops (not in security's ownership; 1 and 2 are fixed, 3 to 6 are informational):
+1. **LOW, redirects: FIXED (re-read 2026-10-12).** `deploy_lib.py` now uses `_NoRedirect` / `open_no_redirect`
+   (`default_opener`, `fetch_version`, `RenderApi._request`), which raise `DeployError` instead of re-sending
+   `Authorization` or the hook query string to a redirect target.
+2. **LOW, base URL scheme: FIXED (re-read 2026-10-12).** `validate_base_url` accepts `https://` only, plus
+   `http://` for loopback hosts (`localhost`, `127.0.0.1`, `::1`), and is used by `fetch_version` and `preflight`.
 3. **INFO**: `RENDER_API_KEY` cannot be scoped at Render; keep it optional, create it under a dedicated user,
    and rotate it after demos. `demo-unsafe` must have its own secrets or required reviewers, otherwise the
    typed confirmation is the only barrier before production receives a broken image.
@@ -544,6 +541,20 @@ Observed (reported by the repository owner and by workflow runs; not independent
   run **38211082924** passed.
 - Dependabot PRs #1 and #2 were reviewed (pinned SHAs matched the upstream tags; the releases were 3 to 5 days old)
   and merged; the CI uv pin was aligned to 0.13.0 (commit 04b0535), matching the image's `uv` stage.
+- **`rollback.yml` verified on real GitHub + Render (run 38213914551):** `verify-image` (`packages: read`) checked
+  the digest against GHCR and read its OCI labels, then `rollback` (environment `production`) redeployed that
+  digest, smoke-tested it and rebuilt nothing.
+- **`perf.yml` verified (run 38214612234):** a secret-free workflow with `contents: read` only. It needed
+  `STOCKFLOW_BASE_URL` as a repository-level variable because it has no environment (inventory in 5).
+- **The deploy gate fails closed (release run 38211027004):** on the Render free plan the deploy hung for about
+  18 minutes and then failed; the pipeline reported failure instead of success, and no green run existed without a
+  live, verified deployment.
+- **Concurrency observed:** rapid pushes to `main` cancel an earlier `ci` run, and with it an earlier release run in
+  its `ci` phase (`ci-<workflow>-<ref>` group with `cancel-in-progress: true`); deploys in group
+  `deploy-production` queue and are never cancelled (`cancel-in-progress: false`). A superseded commit therefore
+  gets no release; only the newest push is released.
+- `render.yaml` no longer sets `DEPLOY_ENVIRONMENT` (commit 132e4ae): the image default applies, and a Render-level
+  value would override the image's and could be copied to previews.
 - Environment `production`: restricted to `main`.
 - Environment `demo-unsafe`: required reviewer (the repository owner).
 - Environment `preview`: **no deployment-branch rule and no required reviewers.**
@@ -564,10 +575,11 @@ Accepted risks (solo repository, demo purpose). Each is explicit and remains ope
 4. Items already listed in 8 stay as they are: the gate is advisory (T16) and `pr-<n>` tags accumulate (T18). The cleanup
    race (T17) is fixed and verified on real events except supersede-during-deploy (NOT VERIFIED).
 
-NOT VERIFIED (not exercised yet): required-reviewer and deployment-branch behaviour for `pull_request` runs, a
-second collaborator's PR, `PREVIEW_PLAN` on a paid plan, supersede-during-deploy, whether Render copies other
-base-service env vars to previews, a failed preview deploy path against the real Render API, and
-`demo-unsafe-deploy.yml` end to end against a separate demo service.
+NOT VERIFIED (not exercised yet): `demo-unsafe-deploy.yml` end to end; the fork-PR guard on a real fork (Dependabot
+guard is verified); the `wait-gate` timeout; the red-gate path (a PR whose `quality-gate` fails gets no preview);
+supersede-during-deploy; a scheduled (cron) run of `demo-fixtures.yml` (only a dispatch run passed); required-reviewer
+and deployment-branch behaviour for `pull_request` runs; a second collaborator's PR; `PREVIEW_PLAN` on a paid plan;
+whether Render copies other base-service env vars to previews; a failed preview deploy path against the real Render API.
 
 ---------------------------------------------------------------------------------------------------
 

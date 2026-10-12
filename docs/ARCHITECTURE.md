@@ -735,6 +735,8 @@ workflow; the only write permission (`packages: write`) is at job level in `rele
   `/health`; no automatic rollback) and the rollback recovery. Expected result is a red run.
 - **perf.yml** - opt-in k6 against the deployed service (`workflow_dispatch`, confirmation `WRITE`,
   variable `STOCKFLOW_BASE_URL`), thresholds from the policy (`make perf`). Writes data; not part of delivery.
+  The workflow declares no `environment:`, so `STOCKFLOW_BASE_URL` must exist as a **repository** variable
+  (an environment-scoped copy is not visible to it); without it the job fails fast.
 - **demo-fixtures.yml** - weekly (Mondays) and `workflow_dispatch` run of `make demo-fixtures`
   (`python demo/inject.py --validate-fixtures`) to detect stale advisory fixtures (`bad_dependency`,
   `bad_container`); `contents: read`, no secrets. Run it manually before each demo too (see `demo/README.md`).
@@ -771,10 +773,28 @@ workflow; the only write permission (`packages: write`) is at job level in `rele
     - `demo-fixtures.yml` via `workflow_dispatch` passed (run 38211082924);
     - a real preview from PR #5 reported environment `preview-pr-5` and version `0.1.0-pr5` (see point 4);
     - CI pins uv 0.13.0, the same version as the image (commit 04b0535).
-  - Still **NOT VERIFIED**: the fork-PR guard on a real fork event; the `gate` timeout; the red-gate path
-    (a PR whose `quality-gate` fails); the supersede-during-deploy branch (a newer push while a preview deploy
-    is running); `rollback.yml`; `demo-unsafe-deploy.yml`; `perf.yml`; the scheduled (cron) run of
-    `demo-fixtures.yml` (only the manual dispatch ran); Dependabot-opened PRs triggering other workflows.
+  - VERIFIED `rollback.yml` (run 38213914551): input digest `sha256:bb0c581d...` = the first published image
+    (version 0.1.0, commit f350a66). `verify-image` passed (digest exists in GHCR; version and sha read from
+    the OCI labels); `rollback` redeployed that exact digest through the hook with no rebuild; the smoke test
+    passed against the restored image's sha; live `/api/version` went from ff14573 to f350a66 in about 2
+    minutes. The next push's release then restored 132e4ae.
+  - VERIFIED `perf.yml` against the live service (run 38214612234): 10 VUs, p95 104.05 ms (< 500 ms), failed
+    requests 0.00 % (< 1 %), checks 3136/3136. The first attempt (38214572952) failed fast because the
+    workflow has no `environment:` and `STOCKFLOW_BASE_URL` was set only on the `production` environment; it is
+    now also a repository variable.
+  - Observed failure modes on Render's Free plan and in the pipeline:
+    - **Stalled deploy** (release run 38211027004): the Render deploy ended `failed` ("Timed Out") after about
+      18 minutes, the old instance was shut down and no new instance started. The pipeline detected it and
+      went red; the next deploy recovered in 22 s. Treat a red `deploy` job as "service may be down" and use
+      `rollback.yml` or re-run the release.
+    - **Rapid back-to-back pushes cancel the earlier release run** (the embedded `ci` job's concurrency group
+      cancels in-progress runs), so only the latest commit is released. This is by design, but a cancelled
+      run leaves no GHCR image or record for that commit.
+  - Still **NOT VERIFIED**: `demo-unsafe-deploy.yml` (needs a manually pushed broken image plus approval on
+    the `demo-unsafe` environment); the fork-PR guard on a real fork event; the `gate` timeout; the red-gate
+    path (a PR whose `quality-gate` fails); the supersede-during-deploy branch (a newer push while a preview
+    deploy is running); the scheduled (cron) run of `demo-fixtures.yml` (only the manual dispatch ran); a paid
+    `PREVIEW_PLAN`; Dependabot-opened PRs triggering other workflows.
 
 Render points for previews, as of that run:
 1. **Confirmed**: a preview of the Free-plan base service was created on the **Free** plan. `PREVIEW_PLAN`
@@ -788,11 +808,10 @@ Render points for previews, as of that run:
    `pr-preview.yml` passes `preview-pr-<n>`. A real preview (PR #5) reported environment `preview-pr-5` and
    version `0.1.0-pr5` (verified 2026-10-12). Previews still copy the base service's settings, and the
    in-memory repository still starts with seed data. **Other inherited base-service env vars: NOT VERIFIED**
-   (as far as known the base service has no custom env vars set). Caveat: if the base service is created
-   from `render.yaml`, that Blueprint sets `DEPLOY_ENVIRONMENT=production` as a Render env var, which would
-   override the image's value in the container, and every preview would then report `production` again. Do not
-   set `DEPLOY_ENVIRONMENT` on the Render service; the image carries it. Also review any variable you later
-   add: PR code runs on Render with the base service's configuration.
+   (as far as known the base service has no custom env vars set). `render.yaml` no longer sets
+   `DEPLOY_ENVIRONMENT` (commit 132e4ae), because a Render-level value would override the image's and could be
+   copied to previews. Do not set it on the Render service; the image carries it. Review any variable you add
+   later: PR code runs on Render with the base service's configuration.
 5. **Confirmed**: redeploying an existing preview by `imageUrl` (the `synchronize` path) works (run 38211488688).
 
 ### 10.5 Trust boundaries of pr-preview.yml
@@ -832,9 +851,8 @@ build tools. Dev-VM note: arm64 host builds/saves with `--platform linux/amd64` 
 ### 10.3 Render
 Image-backed web service (`render.yaml` Blueprint is optional), health check path `/health`, auto-deploy
 off (deploys are triggered only by the hook), `REPOSITORY_BACKEND=memory`, `numInstances: 1`. The environment
-name comes from the image (`DEPLOY_ENVIRONMENT` build arg, default `production`); `render.yaml` still lists
-`DEPLOY_ENVIRONMENT=production` as a Render env var, which is redundant for the base service and would hide
-`preview-pr-<n>` on previews (see 10.1 point 4). Data is non-persistent by design. Render keeps the previous
+name comes from the image (`DEPLOY_ENVIRONMENT` build arg, default `production`); `render.yaml` deliberately does
+not set it (a Render-level value would override the image's, see 10.1 point 4). Data is non-persistent by design. Render keeps the previous
 instance serving until the new one passes `/health` and does **not** roll back by itself.
 
 ### 10.4 Artifact lifecycle

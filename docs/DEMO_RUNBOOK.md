@@ -8,7 +8,7 @@ optional performance regression, a controlled failed deployment, and a manual ro
 against the real tools, in a scratch copy of the repository (the live tree was never modified); outputs are
 trimmed, never invented. Everything that happens on GitHub (Actions UI, checks, environments, approvals,
 GHCR page) and on Render (dashboard, deploys, health checks) is described from the workflow files and Render's
-documentation, **not observed**, with exceptions observed for real on 2026-10-12 (the PR-preview paths and a production release run with Render API polling; see the optional stage P). `rollback.yml`, `demo-unsafe-deploy.yml` and `perf.yml` are not claimed as verified. Rehearse those parts once end to end before presenting
+documentation, **not observed**, with exceptions observed for real on 2026-10-12 (the PR-preview paths and a production release run with Render API polling; see the optional stage P). `rollback.yml` (run 38213914551) and `perf.yml` (run 38214612234) were also run for real on 2026-10-12; `demo-unsafe-deploy.yml` and the manual GHCR push of the broken image it needs are NOT VERIFIED. Rehearse those parts once end to end before presenting
 ([SETUP_GITHUB_RENDER.md](SETUP_GITHUB_RENDER.md) first). Where this runbook estimates a duration it says so.
 
 Contents: [1 Principles](#1-principles-and-honest-caveats) | [2 Preparation](#2-pre-demo-preparation) |
@@ -599,7 +599,7 @@ and with the fault code present but no env keys the endpoint is fast (`GET /api/
 armed it takes about 0.79 s (verified with curl).
 
 **Failing job** None in PR CI: all PR gates pass on purpose, because the defect is inert there. The failing
-signal is k6 (`perf.yml` against a deployed instance, or the command above). **Root cause** `GET /api/products`
+signal is k6 (`perf.yml` against a deployed instance, or the command above). `perf.yml` against production was run for real on 2026-10-12 (run 38214612234: all thresholds passed, p95 104.05 ms, 3136/3136 checks) with the healthy image; the `slow_api` failure itself was demonstrated locally only. **Root cause** `GET /api/products`
 sleeps 750 ms only when both `STOCKFLOW_DEMO_FAULT=slow_api` and `STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES=true`
 are in the process environment. **Fix** Unset the variable or `make demo-reset` / redeploy without the patch.
 **Say** "Functionally correct, so every functional test passes. Only a load test with a latency threshold sees
@@ -685,7 +685,7 @@ run and the local evidence above. Remove the two fault variables from the Render
 
 Approve the `production` environment.
 
-**Expect** (from the workflow definition, not observed) job `verify-image` confirms the digest exists in GHCR
+**Expect** (**verified on real GitHub and Render, 2026-10-12, run 38213914551**: it took about 2 minutes and the live `/api/version` went from ff14573 back to 0.1.0 / f350a66; the next push's release then restored the latest) job `verify-image` confirms the digest exists in GHCR
 and reads version and git sha from its labels; job `rollback` runs `deploy_render.py` with that digest (no
 rebuild), then the smoke test with `--expect-sha` set to **the restored image's** sha, then writes
 `rollback-record`. Production's `/api/version` returns to release A's version and sha. A rollback that cannot run

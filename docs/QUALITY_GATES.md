@@ -44,7 +44,7 @@ justification and an expiry (`pip_audit.ignore`, `.trivyignore`; both are empty 
 | 15 | Image scan (amd64, vulnerabilities and secrets) | `make docker-scan` (= `docker-save` + `trivy-image-tar`) | `trivy-image-scan` | `trivy.image.*` | PR and release |
 | 16 | Final aggregate | n/a | **`quality-gate`** | n/a | the only required status check |
 | 17 | Post-deploy verification (smoke test with `--expect-sha`, then `release_tools.py verify-deployment`) | `make smoke BASE_URL=... EXPECT_SHA=...` | `release.yml` `deploy` job (mandatory on push to `main`; also fails when the hook secret or `STOCKFLOW_BASE_URL` is missing) | `smoke.timeout_seconds`, `smoke.poll_interval_seconds` | marks the release run red; rollback is manual |
-| 18 | Load test (opt-in) | `make perf BASE_URL=...` | `perf.yml` (manual) | `load_test.p95_ms`, `load_test.error_rate_max`, `load_test.vus`, `load_test.duration` | informational; the demo's slow_api scenario |
+| 18 | Load test (opt-in) | `make perf BASE_URL=...` | `perf.yml` (manual; run for real 2026-10-12, run 38214612234, thresholds passed) | `load_test.p95_ms`, `load_test.error_rate_max`, `load_test.vus`, `load_test.duration` | informational; the demo's slow_api scenario |
 | 19 | PR preview image (opt-in, label `preview`; main paths run on GitHub/Render 2026-10-12; red-gate, fork-guard and timeout paths NOT VERIFIED) | `make docker-test`, `make docker-save`, `make trivy-image-tar` (the same targets, run by `pr-preview.yml` `build-scan`) | `pr-preview.yml` jobs `gate`, `build-scan`, `publish`, `preview` | `trivy.image.*`, `smoke.*` | not a merge gate: it waits for a green `quality-gate` and never changes it |
 
 Aggregates: `make security` = `policy-check` + 10 + 11 + 12 + 13. `make quality` = lint + format-check + typecheck

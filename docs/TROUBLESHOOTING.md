@@ -79,7 +79,7 @@ All **(from the code/docs)**.
 | Several quick pushes to `main`: an earlier `release` run is cancelled and that commit is never deployed | `ci.yml` (called by `release.yml`) uses a concurrency group with `cancel-in-progress: true`, so a newer push cancels the embedded `ci` of the earlier release run; `deploy-production` itself never cancels a running deploy | Expected: the latest commit is always the one deployed; an intermediate commit may never reach Render. If a skipped commit must be released, run `release` via workflow_dispatch on it (from `main`). |
 | `deploy` waits | `production` environment needs a reviewer | Review deployments > Approve. |
 | `rollback` / `release` queued for a long time | Concurrency group `deploy-production` is held (`cancel-in-progress: false`) by another run (often `demo-unsafe-deploy`) | Wait or cancel the holding run. |
-| `rollback` fails: "A rollback that cannot run is a failure" | Hook secret / base URL missing | Configure `RENDER_DEPLOY_HOOK_URL` (environment `production`) and `STOCKFLOW_BASE_URL`. |
+| `rollback` (verified working 2026-10-12, run 38213914551, about 2 minutes) fails: "A rollback that cannot run is a failure" | Hook secret / base URL missing | Configure `RENDER_DEPLOY_HOOK_URL` (environment `production`) and `STOCKFLOW_BASE_URL`. |
 | `rollback`/`demo-unsafe-deploy` `verify`/`guard`: image not found | Wrong digest, wrong owner case, or package private | Digest format is `sha256:<64 hex>`; copy it from `release-record` or the package page; owner is lowercase. |
 | `demo-unsafe-deploy`: "type exactly DEPLOY-BROKEN-IMAGE" | Confirmation mismatch | Retype it exactly. |
 | Workflow does not start from a branch | `rollback`, `demo-unsafe-deploy` and `release` guards require `refs/heads/main` | Run the workflow from `main`. |
@@ -114,6 +114,7 @@ Render facts below come from Render's documentation (read 2026-10-10); behaviour
 | Smoke test takes a minute to fail locally | Default retry budget is 60 s per check | `--timeout 5` for a quick local run: `uv run python scripts/smoke_test.py --base-url ... --timeout 5`. |
 | Smoke test usage error (exit 2) | `--base-url` without `http://`/`https://`, or a negative timeout | Fix the argument. |
 | `make perf` ends `make: *** [Makefile:...: perf] Error 99` | k6 exit code 99: a threshold was crossed (seen with `slow_api`: `p(95)=765.73ms`) | Expected for the defect; otherwise investigate latency. Thresholds come from the policy (`load_test.*`). |
+| `perf` workflow fails immediately: `::error::set the repository variable STOCKFLOW_BASE_URL` (**observed** 2026-10-12, run 38214572952) | `perf.yml` has no `environment:` so it can only read a **repository** variable; `STOCKFLOW_BASE_URL` was set only in an environment (or not at all) | `gh variable set STOCKFLOW_BASE_URL --repo <owner>/<repo> --body https://<service>.onrender.com`, then re-run. A repository-level value also satisfies `release` and `rollback`. The re-run (run 38214612234) passed all k6 thresholds. |
 | `make perf` has errors against Render | Free instance (small CPU) or cold start | Run against a local instance; `perf.yml` against Render is opt-in and writes data. |
 | k6: `setup failed: POST /api/products -> ...` | Target unreachable or the API changed | Check `BASE_URL`; the test creates its own product and deactivates it afterwards. |
 

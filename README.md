@@ -270,10 +270,10 @@ Per-scenario commands, expected output and presenter notes: [docs/DEMO_RUNBOOK.m
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | pull request to `main`, push to `main`, manual, reusable | 11 jobs: `config-validation`, `lint-format`, `typecheck`, `unit-tests`, `integration-tests`, `coverage`, `bandit`, `dependency-audit`, `trivy-fs-scan`, `docker-build`, `trivy-image-scan`; plus **`quality-gate`**, the only check branch protection needs (it passes only when every job is exactly `success`). No secrets are used (fork-safe). |
 | [`release.yml`](.github/workflows/release.yml) | push to `main`, manual (`require_deploy`) | re-runs `ci.yml` for that commit; `build-scan` (build amd64, run + smoke test + image guard, Trivy on the exact image); `publish` (the only job with `packages: write`: pushes the `sha-<sha>` and `<version>` tags, captures the digest, verifies the registry's OCI labels, writes `release-record.json`); `deploy` (environment `production`: preflight, deploy hook with `imgURL=ghcr.io/<owner>/stockflow@sha256:...`, smoke test with `--expect-sha`, then `release_tools.py verify-deployment`, which requires the release record, the digest sent in `imgURL` and the live `/api/version` to agree on digest, commit, version and name; `deployment-record.json`). **Deployment is mandatory on every push to `main`**: a run is green only after all of that passed. |
-| [`rollback.yml`](.github/workflows/rollback.yml) | manual: `image_digest`, `reason` | verifies the digest exists in GHCR, redeploys exactly that digest (no rebuild), verifies `/api/version.git_sha` equals the restored image's sha, records it. Fails loudly if it cannot run. |
+| [`rollback.yml`](.github/workflows/rollback.yml) | manual: `image_digest`, `reason` | verifies the digest exists in GHCR, redeploys exactly that digest (no rebuild), verifies `/api/version.git_sha` equals the restored image's sha, records it. Fails loudly if it cannot run. Run for real on 2026-10-12 (run 38213914551, about 2 minutes, green). |
 | [`demo-unsafe-deploy.yml`](.github/workflows/demo-unsafe-deploy.yml) | manual only, from `main`, typed confirmation | **Demonstration only.** Deploys an already-published broken image by digest through environment `demo-unsafe` (configure required reviewers). A red run is the expected result. |
 | [`pr-preview.yml`](.github/workflows/pr-preview.yml) | pull request events (labeled, unlabeled, synchronize, reopened, closed) | **Opt-in PR demos.** Only a PR from this repository (never a fork or Dependabot) that carries the label `preview` gets a Render image preview, built from the PR head, scanned with the same Trivy gate, pushed as `ghcr.io/<owner>/stockflow:pr-<n>` and `:pr-<n>-<sha7>`, and deployed **by digest** only after a green `quality-gate` for that head commit. The label-then-close path was run for real on GitHub and Render on 2026-10-12 (PR #3); other paths are NOT VERIFIED. See [PR demos](#pr-demos-optional-previews). |
-| [`perf.yml`](.github/workflows/perf.yml) | manual, typed `WRITE` confirmation | k6 against `STOCKFLOW_BASE_URL`; it writes products and orders on the target. |
+| [`perf.yml`](.github/workflows/perf.yml) | manual, typed `WRITE` confirmation | k6 against `STOCKFLOW_BASE_URL` (a **repository** variable: the workflow has no environment); it writes products and orders on the target. Run for real on 2026-10-12 (run 38214612234, all thresholds passed). |
 
 Properties: third-party actions pinned to full commit SHAs; top-level `permissions: contents: read` with write
 permissions only per job where the policy allows; deploys serialised (`deploy-production`, never cancelled);
@@ -360,10 +360,14 @@ Details and the threat model: [docs/SECURITY.md](docs/SECURITY.md).
 * **Most GitHub and Render behaviour was not verified live.** The workflows were checked with actionlint; the helper
   scripts and their unit tests run in the suite; the deploy logic was exercised locally (`deploy_render.py
   --dry-run`, a `--provenance=false` image pushed to a throw-away local registry, label reading). Observed for real
-  on 2026-10-12: the PR-preview label-then-close path (PR #3, runs 38209130008 and 38209469656, see above) and a
+  on 2026-10-12: the PR-preview paths (see above), `rollback.yml` (run 38213914551: redeployed the first published
+  digest by digest in about 2 minutes, smoke test green; live `/api/version` went back to 0.1.0 / f350a66), `perf.yml`
+  (run 38214612234: all k6 thresholds passed, p95 104.05 ms against `https://stockflow-0-1-0.onrender.com`) and a
   production release run with Render API polling (`RENDER_API_KEY` and `RENDER_SERVICE_ID` in the `production`
   environment: the poll saw the deploy go `update_in_progress` then `live`, and the image digest matched). Everything
-  else (branch protection, the demo-unsafe, rollback and perf workflows, the fork guard on a real fork, the gate timeout, the red-gate no-preview path, and so on) is NOT VERIFIED here;
+  else is NOT VERIFIED here: `demo-unsafe-deploy.yml` (and the manual GHCR push of the broken image it needs), the fork-PR
+  guard on a real fork, the gate timeout, the red-gate no-preview path, supersede-during-deploy, the scheduled (cron) run
+  of `demo-fixtures.yml`, a paid `PREVIEW_PLAN`, and branch-protection details;
   treat [docs/SETUP_GITHUB_RENDER.md](docs/SETUP_GITHUB_RENDER.md) as the checklist and expect to adjust to what the
   live UIs show.
 * **Render free tier** spins a service down after 15 minutes without traffic and needs about a minute to start

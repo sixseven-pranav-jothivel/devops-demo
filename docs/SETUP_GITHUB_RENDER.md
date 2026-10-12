@@ -2,7 +2,7 @@
 
 This is the checklist for the first real run of the pipeline. Honest status: the settings below were **not**
 exercised from the development VM. Two things were later observed for real on GitHub and Render on 2026-10-12 (the
-PR-preview label-then-close path, section 8, and a production release run with Render API polling); everything else
+PR-preview paths, section 8; a production release run with Render API polling; `rollback.yml`; and `perf.yml`, see section 9); everything else
 here is still NOT VERIFIED. The workflows, scripts and policy were verified locally (actionlint, unit tests of the deploy helpers,
 `deploy_render.py --dry-run`, a `--provenance=false` push to a throw-away local registry plus label reading).
 Where this guide relies on documentation of GitHub or Render rather than on something observed, it says so.
@@ -92,8 +92,13 @@ Settings > Secrets and variables > Actions > **Variables** (repository level):
 |---|---|---|
 | `STOCKFLOW_BASE_URL` | `https://<your-service>.onrender.com` (https, no path) | `release.yml`, `rollback.yml`, `demo-unsafe-deploy.yml`, `perf.yml` |
 
-It must be a **repository-level** variable because `perf.yml` runs without an environment. An environment-level
-variable of the same name (set on `demo-unsafe`) overrides it for jobs in that environment. The preflight step
+It must be a **repository-level** variable because `perf.yml` runs without an environment and therefore cannot read an
+environment-scoped one. **Observed 2026-10-12:** the first `perf` run (38214572952) failed fast with
+`::error::set the repository variable STOCKFLOW_BASE_URL` for exactly that reason. Set it with
+`gh variable set STOCKFLOW_BASE_URL --repo sixseven-pranav-jothivel/devops-demo --body https://<service>.onrender.com`;
+a repository-level variable satisfies `release`, `rollback` and `perf` alike (the release preflight accepts a repository
+variable or one in the `production` environment). An environment-level variable of the same name (set on `demo-unsafe`)
+overrides it for jobs in that environment. The preflight step
 refuses a value that does not start with `http://` or `https://`.
 
 No other variables or secrets are used. In particular there is no registry credential for Render (the package
@@ -356,7 +361,8 @@ Observed on 2026-10-12 with PR #3 (labelled `preview`, then closed): `pr-preview
   38213211381); a Dependabot PR gets the `pr-preview` run SKIPPED (guard works on a real event). The `demo-fixtures.yml`
   workflow, run manually, passed on GitHub (run 38211082924).
 * **Still NOT VERIFIED:** the fork-PR guard on a real fork, the gate timeout, the red-gate "no preview" path,
-  whether Render copies other base-service env vars to previews, and `rollback.yml`, `demo-unsafe-deploy.yml`, `perf.yml`.
+  whether Render copies other base-service env vars to previews, and a paid `PREVIEW_PLAN` (see section 9 for the
+  rest).
 
 ### 8.1 What it does
 
@@ -432,3 +438,9 @@ A PR with a red `quality-gate` gets the comment "No preview" instead of a deploy
 4. Push another commit: the same preview is redeployed to the new digest.
 5. Remove the label or close the PR: `cleanup` runs, the comment says `Preview deleted`, and the service
    `stockflow-pr-<n>` is deleted from Render (observed both for closing the PR and for removing the label).
+
+## 9. Observed on 2026-10-12: rollback and perf, and what is still NOT VERIFIED
+
+* **`rollback.yml` (verified).** Observed 2026-10-12: `rollback` run 38213914551 (workflow_dispatch with `image_digest=sha256:bb0c581d...`, the first published image, version 0.1.0, commit f350a66, plus a reason): `verify-image` passed (the digest exists in GHCR; version 0.1.0 and git_sha f350a66... were read from the image's OCI labels); the `rollback` job redeployed that exact digest through the deploy hook (Render deploy `dep-db6837q...` from `deploy_hook`, image ref `@sha256:bb0c581d...`); the smoke test passed against the restored image's sha; the run was green in about 2 minutes; live `/api/version` then reported 0.1.0 / f350a66 (it had been ff14573). The next push's release restored the latest (live 132e4ae). Rollback by digest, with no rebuild, is therefore VERIFIED on real GitHub and Render.
+* **`perf.yml` (verified).** Observed 2026-10-12: `perf` run 38214612234 (workflow_dispatch, `confirm_writes=WRITE`) against `https://stockflow-0-1-0.onrender.com`: 10 VUs, every k6 threshold passed (p95 = 104.05 ms against the policy limit; http_req_failed 0.00%; checks 3136/3136). The first attempt (run 38214572952) failed fast with `::error::set the repository variable STOCKFLOW_BASE_URL` because `perf.yml` has no `environment:` and cannot read an environment-scoped variable (see SETUP 1.5).
+* **Still NOT VERIFIED:** `demo-unsafe-deploy.yml` (and the manual GHCR push of the broken image it needs), the fork-PR guard on a real fork, the gate timeout, the red-gate no-preview path, supersede-during-deploy, the scheduled (cron) run of `demo-fixtures.yml`, and a paid `PREVIEW_PLAN`.

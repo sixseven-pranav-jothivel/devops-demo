@@ -42,10 +42,12 @@ smoke test -> deployment record -> manual rollback by digest. k6 for load tests.
   Verified for real (2026-10-12): ci, release (incl. Render API polling, run 38206976235), the full preview
   lifecycle (create PR #3 run 38209130008; synchronize redeploy 38211488688; unlabel cleanup 38213110510; close
   cleanup 38209469656; no preview while unlabeled 38213182325/38213211381; Dependabot PRs skipped),
-  demo-fixtures dispatch (38211082924). Previews report `DEPLOY_ENVIRONMENT=preview-pr-<n>` (build arg, commit
-  ff14573; the earlier "inherits production" note was wrong). Still NOT VERIFIED: fork-PR guard, gate timeout,
-  red-gate path, supersede-during-deploy, rollback.yml, demo-unsafe-deploy.yml, perf.yml, cron run of
-  demo-fixtures.yml.
+  demo-fixtures dispatch (38211082924), rollback.yml (38213914551), perf.yml (38214612234: p95 104 ms, 0 %
+  failed). Previews report `DEPLOY_ENVIRONMENT=preview-pr-<n>` (build arg, commit ff14573; render.yaml must not set
+  it). Still NOT VERIFIED: demo-unsafe-deploy.yml, fork-PR guard, gate timeout, red-gate path,
+  supersede-during-deploy, cron run of demo-fixtures.yml, paid PREVIEW_PLAN. perf.yml has no `environment:`, so
+  `STOCKFLOW_BASE_URL` must be a repository variable. Observed: Render Free-plan deploys can stall ("Timed Out"
+  after ~18 min, pipeline goes red); rapid pushes cancel the earlier release run.
   A push to main REQUIRES a verified deployment: missing `RENDER_DEPLOY_HOOK_URL` / `vars.STOCKFLOW_BASE_URL`
   fails the `deploy` job (the image is still published to GHCR first). Manual runs default `require_deploy: true`.
   `deployment-record.json` says `deployed: true` only after Render, the smoke test and `verify-deployment` all passed.
