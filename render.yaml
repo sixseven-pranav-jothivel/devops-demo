@@ -17,7 +17,8 @@ services:
     numInstances: 1 # in-memory data: exactly one instance, state resets on every deploy/restart
     healthCheckPath: /health
     envVars:
-      - key: DEPLOY_ENVIRONMENT
-        value: production
+      # DEPLOY_ENVIRONMENT is deliberately NOT set here: the image defaults to "production", and a Render-level
+      # value would override the image's value (and could be copied to PR previews, which build with
+      # DEPLOY_ENVIRONMENT=preview-pr-<n> so that a preview never reports itself as production).
       - key: REPOSITORY_BACKEND
         value: memory

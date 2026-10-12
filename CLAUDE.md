@@ -39,10 +39,13 @@ smoke test -> deployment record -> manual rollback by digest. k6 for load tests.
   `build-scan` runs PR code with no secrets; `publish` has `packages: write` and loads a sha256-verified
   tarball; `preview`/`cleanup` hold the Render secrets (environment `preview`) and run base-branch scripts
   only; `report` has `pull-requests: write`.
-  Verified for real (2026-10-12): ci, release (incl. Render API polling, run 38206976235), the preview create
-  and close-cleanup path (PR #3, runs 38209130008 / 38209469656). Still NOT VERIFIED: unlabel cleanup,
-  redeploy of an existing preview, fork/Dependabot guards on real events, gate timeout, rollback.yml,
-  demo-unsafe-deploy.yml, perf.yml, scheduled demo-fixtures.yml, Dependabot.
+  Verified for real (2026-10-12): ci, release (incl. Render API polling, run 38206976235), the full preview
+  lifecycle (create PR #3 run 38209130008; synchronize redeploy 38211488688; unlabel cleanup 38213110510; close
+  cleanup 38209469656; no preview while unlabeled 38213182325/38213211381; Dependabot PRs skipped),
+  demo-fixtures dispatch (38211082924). Previews report `DEPLOY_ENVIRONMENT=preview-pr-<n>` (build arg, commit
+  ff14573; the earlier "inherits production" note was wrong). Still NOT VERIFIED: fork-PR guard, gate timeout,
+  red-gate path, supersede-during-deploy, rollback.yml, demo-unsafe-deploy.yml, perf.yml, cron run of
+  demo-fixtures.yml.
   A push to main REQUIRES a verified deployment: missing `RENDER_DEPLOY_HOOK_URL` / `vars.STOCKFLOW_BASE_URL`
   fails the `deploy` job (the image is still published to GHCR first). Manual runs default `require_deploy: true`.
   `deployment-record.json` says `deployed: true` only after Render, the smoke test and `verify-deployment` all passed.

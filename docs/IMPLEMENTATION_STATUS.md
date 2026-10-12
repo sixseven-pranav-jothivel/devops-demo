@@ -6,12 +6,12 @@ Ticked only from real command output; nothing here is estimated.
 
 Last synchronised: 2026-10-12. The local clone has no commits, but the pipeline has run on GitHub and Render (see Phase 7).
 
-## Verification summary (real runs on the dev VM, aarch64, Python 3.12.15, uv 0.12.24)
+## Verification summary (real runs on the dev VM, aarch64, Python 3.12.15, uv 0.12.24 on the dev VM; CI and the image pin 0.13.0)
 
 | Check | Command | Result |
 |---|---|---|
-| Tests + coverage | `uv run pytest -q --cov` | **1431 passed** (0 failed) in 48 s; branch coverage **100.00 %** (849 stmts, 104 branches; policy floor 85) |
-| Marker split | `pytest --collect-only -m <marker>` | unit 469, integration 845 (concurrency 18 inside it), demo 117; total 1431 |
+| Tests + coverage | `uv run pytest -q --cov` | **1433 passed** (0 failed) in 43 s; branch coverage **100.00 %** (849 stmts, 104 branches; policy floor 85) |
+| Marker split | `pytest --collect-only -m <marker>` | unit 471, integration 845 (concurrency 18 inside it), demo 117; total 1433 (`tests/deploy/`: 278) |
 | Lint / format / types | `make lint format-check typecheck` | ruff: All checks passed; 78 files formatted; mypy strict: no issues in 36 source files |
 | Config validation | `make policy-check`, `actionlint .github/workflows/*.yml` | quality policy OK (it now allows the `pr-preview.yml` write permissions); actionlint exit 0 |
 | Security gates | `make security` | exit 0: policy-check, bandit "No issues identified", pip-audit "No known vulnerabilities found", trivy fs `uv.lock` 0 vulnerabilities, trivy config `Dockerfile` 0 misconfigurations |
@@ -48,7 +48,7 @@ but were not re-run here), and `make perf`.
 - [ ] `tax_rate` context key so the order preview follows `TAX_RATE` (backend, optional)
 
 ## Phase 4 - Tests (qa)
-- [x] unit, service, repository contract, API, invariants, concurrency tests (1431 pass)
+- [x] unit, service, repository contract, API, invariants, concurrency tests (1433 pass)
 - [x] coverage 100.00 % branch, floor 85 enforced by `make test-coverage` and mirrored in the policy
 - [x] scripts/smoke_test.py (exercised against the container)
 - [x] load-tests (`performance.js`, `smoke.js`); `slow_api` verification drives k6 successfully
@@ -76,13 +76,17 @@ but were not re-run here), and `make perf`.
 - [x] `ci.yml` on GitHub: green, all jobs
 - [x] `release.yml` on GitHub: green: build-scan, publish (GHCR), deploy via hook, Render deploy live, deployed digest verified through Render's deploy history, live `/api/version.git_sha` == pushed commit
 - [x] Render API polling in `release.yml` (`RENDER_API_KEY` + `RENDER_SERVICE_ID` in environment `production`): saw `update_in_progress` -> `live`, image digest matched (run 38206976235)
-- [x] `pr-preview.yml` happy path: PR #3 with label `preview`, run 38209130008 passed decide, gate, build-scan, publish, preview, report; `stockflow-pr-3` created (parent = base) on the Free plan by `@sha256` `imagePath`; URL `https://stockflow-pr-3.onrender.com`; served version `0.1.0-pr3` and the PR head sha; inherited `DEPLOY_ENVIRONMENT=production` (cosmetic)
+- [x] `pr-preview.yml` happy path: PR #3 with label `preview`, run 38209130008 passed decide, gate, build-scan, publish, preview, report; `stockflow-pr-3` created (parent = base) on the Free plan by `@sha256` `imagePath`; URL `https://stockflow-pr-3.onrender.com`; served version `0.1.0-pr3` and the PR head sha
 - [x] `pr-preview.yml` cleanup on PR close: run 38209469656 deleted the service (verified via the Render API); sticky comment "Preview deleted"
-- [x] Render points confirmed: Free base -> Free preview, digest `imagePath`, URL shape, inherited env vars (see ARCHITECTURE 10.1)
+- [x] Render points confirmed: Free base -> Free preview, digest `imagePath`, URL shape, redeploy of an existing preview by `imageUrl`
+- [x] Preview environment name: an earlier note claiming previews inherit `DEPLOY_ENVIRONMENT=production` was WRONG (it was the Dockerfile's fixed ENV default). Commit ff14573 made it a build arg (default `production`, `preview-pr-<n>` in pr-preview.yml); a real preview from PR #5 reported `preview-pr-5` / `0.1.0-pr5`
+- [x] `synchronize` push redeploys the existing preview in place (run 38211488688)
+- [x] `unlabeled` cleanup (run 38213110510; URL 404, comment "Preview deleted"); push while unlabeled creates nothing (run 38213182325); closed-while-unlabeled cleanup runs (run 38213211381)
+- [x] Dependabot PRs: pr-preview skipped (guard OK on real events); PRs #1 and #2 reviewed and merged
+- [x] `demo-fixtures.yml` manual dispatch passed (run 38211082924); CI uv pin 0.13.0 aligned with the image (commit 04b0535)
 - [x] GitHub configuration verified: branch protection requiring `quality-gate`; environments `production` (main only), `demo-unsafe` (reviewer) and `preview`; secrets set
-- [ ] **NOT VERIFIED** (code and fake-backed unit tests only): `unlabeled` cleanup path; `synchronize` redeploy of an existing preview (`imageUrl`); cleanup-race branches; fork and Dependabot guards on real events; `gate` timeout; `rollback.yml`; `demo-unsafe-deploy.yml`; `perf.yml`; scheduled run of `demo-fixtures.yml`; Dependabot
-- [x] `demo-fixtures.yml` (scheduled `--validate-fixtures`) written and actionlint-clean; the scheduled run on GitHub is **NOT VERIFIED**
-- [ ] Review of other inherited env vars/secrets on previews before opening previews to more contributors
+- [ ] **NOT VERIFIED**: fork-PR guard on a real fork event; `gate` timeout; red-gate path (failing `quality-gate`); supersede-during-deploy branch; cleanup-race branches other than closed-while-unlabeled; `rollback.yml`; `demo-unsafe-deploy.yml`; `perf.yml`; the scheduled (cron) run of `demo-fixtures.yml`
+- [ ] Other inherited base-service env vars on previews: **NOT VERIFIED** (none known to be set). Remove `DEPLOY_ENVIRONMENT=production` from `render.yaml` (devops) so a Blueprint-created base cannot override `preview-pr-<n>`; review any variable added later before opening previews to more contributors
 - [ ] SHA pins verified against the GitHub API by the architect: not done (devops/security responsibility)
 
 ## Phase 8 - Defect injection (demo-engineer)
@@ -99,7 +103,7 @@ but were not re-run here), and `make perf`.
 - [ ] The 35-45 minute DEMO_RUNBOOK timeline has not been rehearsed end to end by the architect (NOT VERIFIED)
 
 ## Phase 10 - Integration and release readiness
-- [x] Clean baseline passes: `pytest -q --cov` (1431 pass, 100 % branch), lint, format, types, `make policy-check`, actionlint; `make security` passed earlier in this session and was not repeated in this pass
+- [x] Clean baseline passes: `pytest -q --cov` (1433 pass, 100 % branch), lint, format, types, `make policy-check`, actionlint; `make security` passed earlier in this session and was not repeated in this pass
 - [x] `make docker-test` green on the linux/amd64 image
 - [x] `demo-verify-all` green; `demo-reset` leaves a clean tree (`no scenario active`, no markers)
 - [ ] `make quality` as a single command: its components passed individually; the single-command run was

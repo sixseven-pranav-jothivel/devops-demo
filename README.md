@@ -102,7 +102,7 @@ $ curl -s localhost:8131/ready       -> {"status":"ready","repository":"memory"}
 ```
 
 Configuration is environment only (`app/config.py`): `PORT` (default 8000), `APP_VERSION`, `GIT_SHA`,
-`BUILD_TIME`, `DEPLOY_ENVIRONMENT`, `REPOSITORY_BACKEND` (`memory` in production). A bare local run reports
+`BUILD_TIME`, `DEPLOY_ENVIRONMENT` (a Dockerfile build argument, default `production`), `REPOSITORY_BACKEND` (`memory` in production). A bare local run reports
 version `0.0.0-dev` and sha `unknown`; the Docker image bakes in the real values.
 
 Endpoints: `GET /` (dashboard), `GET /health`, `GET /ready`, `GET /api/version`, `GET /api/metrics`,
@@ -136,8 +136,8 @@ Every gate is a Make target and every threshold comes from [`config/quality-poli
 | `make lint` | `ruff check .` | `All checks passed!` |
 | `make format-check` | `ruff format --check .` | `73 files already formatted` |
 | `make typecheck` | `mypy` (strict) | `Success: no issues found in 36 source files` |
-| `make test` | `pytest` (all tests) | `1431 passed` |
-| `make test-coverage` | pytest + branch coverage, fails under the policy threshold | `Required test coverage of 85% reached. Total coverage: 100.00%`, `1431 passed` |
+| `make test` | `pytest` (all tests) | `1433 passed` |
+| `make test-coverage` | pytest + branch coverage, fails under the policy threshold | `Required test coverage of 85% reached. Total coverage: 100.00%`, `1433 passed` |
 | `make security` | policy check, bandit, pip-audit, trivy fs, trivy config | `quality policy OK`; bandit `No issues identified.`; pip-audit `No known vulnerabilities found`; trivy fs and config: 0 findings |
 | `make quality` | lint, format-check, typecheck, test-coverage, security | exit 0 |
 | `make policy-check`, `make lock-check`, `make workflow-lint` | policy/mirror/drift check, `uv lock --check`, actionlint | all exit 0 |
@@ -289,9 +289,11 @@ That is deliberate: a release can never look green without a verified deployment
 
 ## PR demos (optional previews)
 
-**Status: the main path was run for real on GitHub and Render (2026-10-12); the rest is NOT VERIFIED.** Observed on 2026-10-12 with PR #3 (labelled `preview`, then closed): `pr-preview` run 38209130008 passed every job (`decide`, `gate`, `build-scan`, `publish`, `preview`, `report`); the `gate` job waited for a green `quality-gate`; the sticky comment read "DEPLOYED and verified" with URL `https://stockflow-pr-3.onrender.com`, commit `8cbaf837c419` and digest `sha256:41d40667...`; Render created a separate service `stockflow-pr-3` (parent = the base service) on the **free** plan with `imagePath` `ghcr.io/sixseven-pranav-jothivel/stockflow@sha256:<digest>`; `/api/version` served version `0.1.0-pr3` and the PR head sha; closing the PR started cleanup run 38209469656 (success), the Render service was deleted (checked through the Render API: only the base service remained) and the comment became "Preview deleted". The preview reported `environment: production` because previews inherit the base service's environment variables (a known cosmetic limitation).
+**Status: the main paths were run for real on GitHub and Render (2026-10-12); a few paths are still NOT VERIFIED (listed below).** Observed on 2026-10-12 with PR #3 (labelled `preview`, then closed): `pr-preview` run 38209130008 passed every job (`decide`, `gate`, `build-scan`, `publish`, `preview`, `report`); the `gate` job waited for a green `quality-gate`; the sticky comment read "DEPLOYED and verified" with URL `https://stockflow-pr-3.onrender.com`, commit `8cbaf837c419` and digest `sha256:41d40667...`; Render created a separate service `stockflow-pr-3` (parent = the base service) on the **free** plan with `imagePath` `ghcr.io/sixseven-pranav-jothivel/stockflow@sha256:<digest>`; `/api/version` served version `0.1.0-pr3` and the PR head sha; closing the PR started cleanup run 38209469656 (success), the Render service was deleted (checked through the Render API: only the base service remained) and the comment became "Preview deleted". The preview's environment label is `preview-pr-<n>`: `DEPLOY_ENVIRONMENT` is a Dockerfile **build argument** (default `production`; `make docker-build` passes it) and `pr-preview.yml` builds with `DEPLOY_ENVIRONMENT=preview-pr-<n>`. (An earlier version of these docs said previews inherit the base service's env vars and so report `production`; that was wrong: `production` was simply the value baked into the image by default. Fixed in commit ff14573; verified locally and on real Render.)
 
-**Still NOT VERIFIED (never exercised):** removing the label (the `unlabeled` path), a new commit redeploying an existing preview (`synchronize`), the cleanup race branches, the fork and Dependabot guards on real events, and the gate timeout. Every closed PR also starts a `cleanup` run (it exits quickly when the PR had no preview).
+Observed on 2026-10-12 with same-repository PR #4 (all on real GitHub events): a `synchronize` push redeployed the existing preview in place (run 38211488688: same URL, new sha, still a single sticky comment); removing the label ran cleanup and deleted the service (run 38213110510: the URL then returned 404 and the comment read "Preview deleted"); a push while the label was absent created nothing (run 38213182325); closing the PR while unlabeled still ran the cleanup job (run 38213211381); and a Dependabot PR got the `pr-preview` run SKIPPED (the guard works on a real event). PR #5's preview served `{"version":"0.1.0-pr5","environment":"preview-pr-5"}`. Separately, the `demo-fixtures.yml` workflow (manual run) passed on GitHub (run 38211082924).
+
+**Still NOT VERIFIED:** the fork-PR guard on a real fork, the gate timeout, the red-gate "no preview" path, and whether Render copies base-service environment variables other than the image's own to previews (the base service here has no custom env vars as far as is known). `rollback.yml`, `demo-unsafe-deploy.yml` and `perf.yml` are also not claimed as verified here. Every closed PR also starts a `cleanup` run (it exits quickly when the PR had no preview).
 
 * **Opt-in per PR.** Add the repository label `preview` to a pull request. PRs from forks and from Dependabot
   never get one; PRs without the label never get one.
@@ -310,9 +312,10 @@ That is deliberate: a release can never look green without a verified deployment
   `NOT DEPLOYED: preview not configured`. Setup: [docs/SETUP_GITHUB_RENDER.md](docs/SETUP_GITHUB_RENDER.md#8-optional-per-pr-preview-environments).
 * **Render-side facts, now observed (2026-10-12):** a preview of a free image-backed base service can itself be on the
   free plan; Render's preview API accepts the `repo@sha256:<digest>` form of `imagePath`; the preview URL is
-  `https://<service-name>.onrender.com` with the name `stockflow-pr-<n>`; previews inherit the base service's
-  environment variables (so the preview's `/api/version` and dashboard say environment `production`). A preview is a
-  separate Render service with its own in-memory data.
+  `https://<service-name>.onrender.com` with the name `stockflow-pr-<n>`; a preview's
+  `/api/version` says environment `preview-pr-<n>` (set at image build time, not by Render). Whether Render copies
+  *other* base-service environment variables to previews is NOT VERIFIED. A preview is a separate Render service with
+  its own in-memory data.
 * Trade-off: this needs a Render API key, which is more powerful than the deploy hook. Read the risk notes in
   the setup guide before enabling it.
 
@@ -360,7 +363,7 @@ Details and the threat model: [docs/SECURITY.md](docs/SECURITY.md).
   on 2026-10-12: the PR-preview label-then-close path (PR #3, runs 38209130008 and 38209469656, see above) and a
   production release run with Render API polling (`RENDER_API_KEY` and `RENDER_SERVICE_ID` in the `production`
   environment: the poll saw the deploy go `update_in_progress` then `live`, and the image digest matched). Everything
-  else (branch protection, the demo-unsafe and rollback workflows, the other preview paths, and so on) is NOT VERIFIED;
+  else (branch protection, the demo-unsafe, rollback and perf workflows, the fork guard on a real fork, the gate timeout, the red-gate no-preview path, and so on) is NOT VERIFIED here;
   treat [docs/SETUP_GITHUB_RENDER.md](docs/SETUP_GITHUB_RENDER.md) as the checklist and expect to adjust to what the
   live UIs show.
 * **Render free tier** spins a service down after 15 minutes without traffic and needs about a minute to start

@@ -143,7 +143,7 @@ pip-audit.txt, trivy-*.txt/json, image.tar, k6 summary, demo-verify.json), `.dem
 | `app_version` | `APP_VERSION` | `str = "0.0.0-dev"` | baked into image by CI |
 | `git_sha` | `GIT_SHA` | `str = "unknown"` | full 40-char sha in CI |
 | `build_time` | `BUILD_TIME` | `str \| None = None` | ISO 8601 |
-| `deploy_environment` | `DEPLOY_ENVIRONMENT` | `str = "local"` | `local`, `ci`, `production` |
+| `deploy_environment` | `DEPLOY_ENVIRONMENT` | `str = "local"` | `local`, `ci`, `production`, `preview-pr-<n>`; set by the image build arg |
 | `port` | `PORT` | `int = 8000` | Render injects it (default 10000) |
 | `host` | `HOST` | `str = "0.0.0.0"` | bind address (bandit B104 is accepted: container bind, documented) |
 | `repository_backend` | `REPOSITORY_BACKEND` | `Literal["memory","sqlite"] = "memory"` | production uses `memory` |
@@ -627,10 +627,10 @@ coverage and `--cov-fail-under` taken from the policy.
 Hermetic: no network, no shared state, SQLite in `tmp_path`, frozen clock where time is asserted.
 Coverage `source=app` only, branch coverage, `fail_under = 85` (policy-mirrored).
 
-Measured on 2026-10-12 (`uv run pytest -q --cov`): **1431 tests, all passed** in 48 s, branch coverage
+Measured on 2026-10-12 (`uv run pytest -q --cov`): **1433 tests, all passed** in 43 s, branch coverage
 **100.00 %** over 849 statements / 104 branches. Marker counts from `pytest --collect-only -m <marker>`:
-unit 469, integration 845 (of which concurrency 18), demo 117; 469 + 845 + 117 = 1431, i.e. every test carries
-exactly one of unit / integration / demo.
+unit 471, integration 845 (of which concurrency 18), demo 117; 471 + 845 + 117 = 1433, i.e. every test carries
+exactly one of unit / integration / demo (`tests/deploy/` alone is 278 tests).
 
 ---------------------------------------------------------------------------------------------------
 
@@ -707,8 +707,8 @@ workflow; the only write permission (`packages: write`) is at job level in `rele
      variables.
   2. `gate` (`checks: read`): `preview_tools.py wait-gate` polls the check runs of `PR_HEAD_SHA` until the
      `quality-gate` run concludes (timeout 1500 s); not green means no preview.
-  3. `build-scan`: checks out the **PR head**, **no secrets**; builds linux/amd64 (`APP_VERSION` =
-     `<version>-pr<n>`), `docker_test.sh`, saves the tarball and publishes its sha256 as a job output, Trivy
+  3. `build-scan`: checks out the **PR head**, **no secrets**; builds linux/amd64 with build args
+     `APP_VERSION=<version>-pr<n>` and `DEPLOY_ENVIRONMENT=preview-pr-<n>`, `docker_test.sh`, saves the tarball and publishes its sha256 as a job output, Trivy
      gate on the tarball (same policy as release), uploads `pr-preview-image-tar`.
   4. `publish` (`packages: write`, **no secrets, no PR code**; scripts from the base branch): verifies the
      tarball sha256, `docker load`, pushes `ghcr.io/<owner>/stockflow:pr-<n>` and `:pr-<n>-<sha7>`, parses the
@@ -759,10 +759,22 @@ workflow; the only write permission (`packages: write`) is at job level in `rele
     comment read "Preview deleted".
   - VERIFIED (GitHub-side configuration): branch protection requiring `quality-gate`; environments
     `production` (main only), `demo-unsafe` (required reviewer) and `preview`; the secrets are set.
-  - Still **NOT VERIFIED** (code and unit tests only): the `unlabeled` cleanup path; `synchronize` redeploying
-    an **existing** preview (`POST /v1/services/{id}/deploys` with `imageUrl`); the cleanup race branches;
-    the fork and Dependabot guards on real events; the `gate` timeout; `rollback.yml`;
-    `demo-unsafe-deploy.yml`; `perf.yml`; the scheduled run of `demo-fixtures.yml`; Dependabot itself.
+  - VERIFIED on real events (2026-10-12, run ids as reported by the orchestrator):
+    - `synchronize` (a push to the PR) **redeploys the existing preview in place** (run 38211488688), i.e. the
+      `POST /v1/services/{id}/deploys` with `imageUrl` path works;
+    - removing the `preview` label runs cleanup (run 38213110510): the URL then returned 404 and the comment
+      read "Preview deleted";
+    - a push while the PR is unlabeled creates nothing (run 38213182325);
+    - closing a PR that is already unlabeled still runs cleanup (run 38213211381);
+    - Dependabot PRs: `pr-preview` was skipped (the Dependabot guard works on real events); PRs #1 and #2 were
+      reviewed and merged;
+    - `demo-fixtures.yml` via `workflow_dispatch` passed (run 38211082924);
+    - a real preview from PR #5 reported environment `preview-pr-5` and version `0.1.0-pr5` (see point 4);
+    - CI pins uv 0.13.0, the same version as the image (commit 04b0535).
+  - Still **NOT VERIFIED**: the fork-PR guard on a real fork event; the `gate` timeout; the red-gate path
+    (a PR whose `quality-gate` fails); the supersede-during-deploy branch (a newer push while a preview deploy
+    is running); `rollback.yml`; `demo-unsafe-deploy.yml`; `perf.yml`; the scheduled (cron) run of
+    `demo-fixtures.yml` (only the manual dispatch ran); Dependabot-opened PRs triggering other workflows.
 
 Render points for previews, as of that run:
 1. **Confirmed**: a preview of the Free-plan base service was created on the **Free** plan. `PREVIEW_PLAN`
@@ -770,12 +782,18 @@ Render points for previews, as of that run:
 2. **Confirmed**: `imagePath` accepts the `repo@sha256:<digest>` form (the preview was created by digest).
 3. **Confirmed**: the preview URL shape is `https://<service-name>.onrender.com` (here
    `https://stockflow-pr-3.onrender.com`), which is what the script accepts.
-4. **Confirmed (cosmetic)**: the preview inherits the base service's env vars, so it reports
-   `DEPLOY_ENVIRONMENT=production` and starts with seed data. Any *other* inherited env var or secret still
-   needs a review before enabling previews for PRs from many contributors: PR code runs on Render with that
-   configuration.
-5. **Still unconfirmed**: redeploying an existing preview by `imageUrl` (the `synchronize` path; the host,
-   repository and image name must match the configured image, which the `pr-<n>` tags satisfy in theory).
+4. **Corrected**: an earlier note claimed that previews inherit `DEPLOY_ENVIRONMENT=production`. That was
+   wrong in cause: `production` was only the Dockerfile's fixed `ENV` default. Since commit ff14573
+   `DEPLOY_ENVIRONMENT` is a build `ARG` (default `production`); `make docker-build` passes it, and
+   `pr-preview.yml` passes `preview-pr-<n>`. A real preview (PR #5) reported environment `preview-pr-5` and
+   version `0.1.0-pr5` (verified 2026-10-12). Previews still copy the base service's settings, and the
+   in-memory repository still starts with seed data. **Other inherited base-service env vars: NOT VERIFIED**
+   (as far as known the base service has no custom env vars set). Caveat: if the base service is created
+   from `render.yaml`, that Blueprint sets `DEPLOY_ENVIRONMENT=production` as a Render env var, which would
+   override the image's value in the container, and every preview would then report `production` again. Do not
+   set `DEPLOY_ENVIRONMENT` on the Render service; the image carries it. Also review any variable you later
+   add: PR code runs on Render with the base service's configuration.
+5. **Confirmed**: redeploying an existing preview by `imageUrl` (the `synchronize` path) works (run 38211488688).
 
 ### 10.5 Trust boundaries of pr-preview.yml
 PR code is untrusted; privileges are split across jobs so no job has both PR code and a secret or write token:
@@ -799,10 +817,11 @@ quality policy now allows exactly those (`actions.allowed_job_write_permissions`
 pr-preview.yml]`, `pull-requests: [pr-preview.yml]`) and `make policy-check` passes again.
 
 ### 10.2 Image (`Dockerfile`, devops)
-Multi-stage: `uv` binary stage (pinned version + digest), `base` (`python:3.12-slim@sha256:...`, the single
+Multi-stage: `uv` binary stage (pinned version + digest; uv 0.13.0, the same pin CI uses), `base` (`python:3.12-slim@sha256:...`, the single
 line `^FROM python:\S+ AS base$` that `bad_container` patches), `builder` (`uv sync --frozen --no-dev
 --no-install-project` into `/opt/venv`), `runtime` (pip removed, non-root uid 10001, code root-owned,
-`ENV DEPLOY_ENVIRONMENT=production PORT=8000`, build args -> `APP_VERSION`/`GIT_SHA`/`BUILD_TIME` envs and OCI
+`ENV PORT=8000`, build args `APP_VERSION`/`GIT_SHA`/`BUILD_TIME`/`DEPLOY_ENVIRONMENT` (the last defaults to
+`production`; `pr-preview.yml` builds with `preview-pr-<n>`) copied into the same-named envs, OCI
 labels, stdlib `HEALTHCHECK` against `/health`, exec-form `CMD ["python", "-m", "app"]`: single uvicorn
 worker, binds `0.0.0.0:$PORT`). `.dockerignore` is an allow-list (`*`, `!app`, `!pyproject.toml`,
 `!uv.lock`), so `demo/`, `tests/`, `load-tests/`, `docs/`, `.github/`, `.demo-state/`, `reports/` never enter
@@ -812,8 +831,10 @@ build tools. Dev-VM note: arm64 host builds/saves with `--platform linux/amd64` 
 
 ### 10.3 Render
 Image-backed web service (`render.yaml` Blueprint is optional), health check path `/health`, auto-deploy
-off (deploys are triggered only by the hook), env vars `DEPLOY_ENVIRONMENT=production`,
-`REPOSITORY_BACKEND=memory`, `numInstances: 1`. Data is non-persistent by design. Render keeps the previous
+off (deploys are triggered only by the hook), `REPOSITORY_BACKEND=memory`, `numInstances: 1`. The environment
+name comes from the image (`DEPLOY_ENVIRONMENT` build arg, default `production`); `render.yaml` still lists
+`DEPLOY_ENVIRONMENT=production` as a Render env var, which is redundant for the base service and would hide
+`preview-pr-<n>` on previews (see 10.1 point 4). Data is non-persistent by design. Render keeps the previous
 instance serving until the new one passes `/health` and does **not** roll back by itself.
 
 ### 10.4 Artifact lifecycle
