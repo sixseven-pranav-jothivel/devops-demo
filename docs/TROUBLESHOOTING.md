@@ -138,3 +138,4 @@ The label-then-close path was observed on GitHub and Render on 2026-10-12 (PR #3
 | Preview runs for a PR but should not (trust) | The workflow file comes from the PR merge commit with `pull_request`, so anyone with write access can alter it | Restrict who can push branches; put required reviewers on the `preview` environment (SETUP 8). |
 
 <!-- lifecycle test 1 -->
+<!-- lifecycle test 2 -->
