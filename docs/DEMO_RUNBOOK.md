@@ -8,7 +8,7 @@ optional performance regression, a controlled failed deployment, and a manual ro
 against the real tools, in a scratch copy of the repository (the live tree was never modified); outputs are
 trimmed, never invented. Everything that happens on GitHub (Actions UI, checks, environments, approvals,
 GHCR page) and on Render (dashboard, deploys, health checks) is described from the workflow files and Render's
-documentation, **not observed**. Rehearse those parts once end to end before presenting
+documentation, **not observed**, with two exceptions observed for real on 2026-10-12 (the PR-preview label-then-close path, and a production release run with Render API polling; see the optional stage P). Rehearse those parts once end to end before presenting
 ([SETUP_GITHUB_RENDER.md](SETUP_GITHUB_RENDER.md) first). Where this runbook estimates a duration it says so.
 
 Contents: [1 Principles](#1-principles-and-honest-caveats) | [2 Preparation](#2-pre-demo-preparation) |
@@ -699,11 +699,11 @@ Rollback impossible (`RENDER_DEPLOY_HOOK_URL`/`STOCKFLOW_BASE_URL` missing): con
 workaround that skips the check. Last resort: in the Render dashboard use manual deploy of the earlier image
 reference.
 
-### Optional stage P: per-PR preview environment (3 to 4 min, NOT VERIFIED)
+### Optional stage P: per-PR preview environment (3 to 4 min; label-then-close observed on 2026-10-12, the rest NOT VERIFIED)
 
 Only if `pr-preview.yml` has been set up and rehearsed ([SETUP_GITHUB_RENDER.md](SETUP_GITHUB_RENDER.md) section
 8). It is not one of the 14 stages and is not in the timeline totals; it fits after stage 7 or in the wrap-up.
-Nothing in it has been run on GitHub or Render; the descriptions come from the workflow and scripts.
+The label-then-close path was run for real on 2026-10-12 (PR #3, `pr-preview` run 38209130008, cleanup run 38209469656; see SETUP section 8.0 for what was seen). Removing the label, a re-push redeploying an existing preview, and the guard/timeout paths are NOT VERIFIED, so do not demonstrate them live without a rehearsal.
 
 **Pre-stage** A same-repository branch `feature/preview-demo` with a trivial, legitimate change (for example the
 version bump from section 2.2 applied to a different branch) and a green PR. Create the label once. At T-30 add the
@@ -720,9 +720,7 @@ bonus: the sticky comment reads `No preview` with `quality-gate FAILED for this 
 4. Close the PR (or remove the label). The `cleanup` run starts; the comment changes to `Preview deleted`; in
    Render the service `stockflow-pr-<n>` is gone.
 
-**Expect** (not observed) comment headline `DEPLOYED and verified` with an `onrender.com` URL; the preview serves
-the PR head sha; the dashboard of the preview may still say environment `production` (previews inherit the base
-service's env vars; unconfirmed on Render) and its data is its own in-memory data, separate from production.
+**Expect** (observed on PR #3) comment headline `DEPLOYED and verified` with a URL of the form `https://stockflow-pr-<n>.onrender.com`; `/api/version` serves version `<version>-pr<n>` (for example `0.1.0-pr3`) and the PR head sha; the preview reports environment `production` (previews inherit the base service's env vars: confirmed, cosmetic) and its data is its own in-memory data, separate from production. On close, the cleanup run succeeds, the Render service is gone and the comment reads `Preview deleted`. Every closed PR starts a cleanup run.
 **Failing job** None expected. Unconfigured: `preview` red with `NOT DEPLOYED: preview not configured`.
 **Say** "Same gates, same scanner, deployed by digest, only for a labelled same-repo PR, only after a green gate,
 and deleted when the PR closes. Render never deletes image previews itself, so the cleanup job exists."
@@ -731,7 +729,7 @@ and deleted when the PR closes. Render never deletes image previews itself, so t
 | Symptom | Recovery |
 |---|---|
 | `NOT DEPLOYED: preview not configured` | Secrets missing from the `preview` environment: say so, show the pre-staged preview or skip the stage |
-| Preview takes too long or Render rejects it (plan, `@sha256` digest form, both unconfirmed) | Show the pre-staged result or the comment text; do not wait live; skip the stage |
+| Preview takes too long or Render rejects it (free plan and the `@sha256` digest form worked on 2026-10-12, but check the job log) | Show the pre-staged result or the comment text; do not wait live; skip the stage |
 | `quality-gate FAILED` comment | Expected on a defect PR; use a green PR for the live demo |
 | `Preview cleanup FAILED` | The comment names `stockflow-pr-<n>`: delete it in the Render dashboard, say that Render never auto-deletes image previews |
 | Reviewer approval pending on `preview` | Approve the environment deployment |

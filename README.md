@@ -272,7 +272,7 @@ Per-scenario commands, expected output and presenter notes: [docs/DEMO_RUNBOOK.m
 | [`release.yml`](.github/workflows/release.yml) | push to `main`, manual (`require_deploy`) | re-runs `ci.yml` for that commit; `build-scan` (build amd64, run + smoke test + image guard, Trivy on the exact image); `publish` (the only job with `packages: write`: pushes the `sha-<sha>` and `<version>` tags, captures the digest, verifies the registry's OCI labels, writes `release-record.json`); `deploy` (environment `production`: preflight, deploy hook with `imgURL=ghcr.io/<owner>/stockflow@sha256:...`, smoke test with `--expect-sha`, then `release_tools.py verify-deployment`, which requires the release record, the digest sent in `imgURL` and the live `/api/version` to agree on digest, commit, version and name; `deployment-record.json`). **Deployment is mandatory on every push to `main`**: a run is green only after all of that passed. |
 | [`rollback.yml`](.github/workflows/rollback.yml) | manual: `image_digest`, `reason` | verifies the digest exists in GHCR, redeploys exactly that digest (no rebuild), verifies `/api/version.git_sha` equals the restored image's sha, records it. Fails loudly if it cannot run. |
 | [`demo-unsafe-deploy.yml`](.github/workflows/demo-unsafe-deploy.yml) | manual only, from `main`, typed confirmation | **Demonstration only.** Deploys an already-published broken image by digest through environment `demo-unsafe` (configure required reviewers). A red run is the expected result. |
-| [`pr-preview.yml`](.github/workflows/pr-preview.yml) | pull request events (labeled, unlabeled, synchronize, reopened, closed) | **Opt-in PR demos, NOT VERIFIED on GitHub or Render.** Only a PR from this repository (never a fork or Dependabot) that carries the label `preview` gets a Render image preview, built from the PR head, scanned with the same Trivy gate, pushed as `ghcr.io/<owner>/stockflow:pr-<n>` and `:pr-<n>-<sha7>`, and deployed **by digest** only after a green `quality-gate` for that head commit. See [PR demos](#pr-demos-optional-previews). |
+| [`pr-preview.yml`](.github/workflows/pr-preview.yml) | pull request events (labeled, unlabeled, synchronize, reopened, closed) | **Opt-in PR demos.** Only a PR from this repository (never a fork or Dependabot) that carries the label `preview` gets a Render image preview, built from the PR head, scanned with the same Trivy gate, pushed as `ghcr.io/<owner>/stockflow:pr-<n>` and `:pr-<n>-<sha7>`, and deployed **by digest** only after a green `quality-gate` for that head commit. The label-then-close path was run for real on GitHub and Render on 2026-10-12 (PR #3); other paths are NOT VERIFIED. See [PR demos](#pr-demos-optional-previews). |
 | [`perf.yml`](.github/workflows/perf.yml) | manual, typed `WRITE` confirmation | k6 against `STOCKFLOW_BASE_URL`; it writes products and orders on the target. |
 
 Properties: third-party actions pinned to full commit SHAs; top-level `permissions: contents: read` with write
@@ -289,7 +289,9 @@ That is deliberate: a release can never look green without a verified deployment
 
 ## PR demos (optional previews)
 
-**Status: written and unit-tested locally, NOT VERIFIED against GitHub or Render.** Nothing here has run on either.
+**Status: the main path was run for real on GitHub and Render (2026-10-12); the rest is NOT VERIFIED.** Observed on 2026-10-12 with PR #3 (labelled `preview`, then closed): `pr-preview` run 38209130008 passed every job (`decide`, `gate`, `build-scan`, `publish`, `preview`, `report`); the `gate` job waited for a green `quality-gate`; the sticky comment read "DEPLOYED and verified" with URL `https://stockflow-pr-3.onrender.com`, commit `8cbaf837c419` and digest `sha256:41d40667...`; Render created a separate service `stockflow-pr-3` (parent = the base service) on the **free** plan with `imagePath` `ghcr.io/sixseven-pranav-jothivel/stockflow@sha256:<digest>`; `/api/version` served version `0.1.0-pr3` and the PR head sha; closing the PR started cleanup run 38209469656 (success), the Render service was deleted (checked through the Render API: only the base service remained) and the comment became "Preview deleted". The preview reported `environment: production` because previews inherit the base service's environment variables (a known cosmetic limitation).
+
+**Still NOT VERIFIED (never exercised):** removing the label (the `unlabeled` path), a new commit redeploying an existing preview (`synchronize`), the cleanup race branches, the fork and Dependabot guards on real events, and the gate timeout. Every closed PR also starts a `cleanup` run (it exits quickly when the PR had no preview).
 
 * **Opt-in per PR.** Add the repository label `preview` to a pull request. PRs from forks and from Dependabot
   never get one; PRs without the label never get one.
@@ -306,10 +308,11 @@ That is deliberate: a release can never look green without a verified deployment
 * **Needs** the `preview` environment with secrets `RENDER_API_KEY` and `RENDER_SERVICE_ID` (the base service
   id) and optionally the variable `PREVIEW_PLAN`. A labelled PR on a repository without them fails with
   `NOT DEPLOYED: preview not configured`. Setup: [docs/SETUP_GITHUB_RENDER.md](docs/SETUP_GITHUB_RENDER.md#8-optional-per-pr-preview-environments).
-* **Render-side facts not verified:** whether a free base service's previews can use the free plan, whether
-  `imagePath` accepts an `@sha256:` digest, how the preview URL is named, and that previews inherit the base
-  service's environment variables (so a preview's dashboard can say `production` as its environment).
-  A preview is a separate Render service with its own in-memory data.
+* **Render-side facts, now observed (2026-10-12):** a preview of a free image-backed base service can itself be on the
+  free plan; Render's preview API accepts the `repo@sha256:<digest>` form of `imagePath`; the preview URL is
+  `https://<service-name>.onrender.com` with the name `stockflow-pr-<n>`; previews inherit the base service's
+  environment variables (so the preview's `/api/version` and dashboard say environment `production`). A preview is a
+  separate Render service with its own in-memory data.
 * Trade-off: this needs a Render API key, which is more powerful than the deploy hook. Read the risk notes in
   the setup guide before enabling it.
 
@@ -351,16 +354,18 @@ Details and the threat model: [docs/SECURITY.md](docs/SECURITY.md).
   redeploy or free-tier spin-down loses all products and orders (the dashboard shows a banner saying so). The
   repository interface allows a managed database later; none is configured.
 * **No authentication and no rate limiting.** It is a public demo app with seeded data.
-* **The GitHub and Render parts were not verified live.** The workflows were checked with actionlint; the helper
+* **Most GitHub and Render behaviour was not verified live.** The workflows were checked with actionlint; the helper
   scripts and their unit tests run in the suite; the deploy logic was exercised locally (`deploy_render.py
-  --dry-run`, a `--provenance=false` image pushed to a throw-away local registry, label reading). No GitHub
-  repository setting, GHCR package, Render service, deploy hook, environment approval or end-to-end release run
-  was exercised, because no external accounts may be touched. Treat
-  [docs/SETUP_GITHUB_RENDER.md](docs/SETUP_GITHUB_RENDER.md) as the checklist for the first real run and expect to
-  adjust to what the live UIs show.
+  --dry-run`, a `--provenance=false` image pushed to a throw-away local registry, label reading). Observed for real
+  on 2026-10-12: the PR-preview label-then-close path (PR #3, runs 38209130008 and 38209469656, see above) and a
+  production release run with Render API polling (`RENDER_API_KEY` and `RENDER_SERVICE_ID` in the `production`
+  environment: the poll saw the deploy go `update_in_progress` then `live`, and the image digest matched). Everything
+  else (branch protection, the demo-unsafe and rollback workflows, the other preview paths, and so on) is NOT VERIFIED;
+  treat [docs/SETUP_GITHUB_RENDER.md](docs/SETUP_GITHUB_RENDER.md) as the checklist and expect to adjust to what the
+  live UIs show.
 * **Render free tier** spins a service down after 15 minutes without traffic and needs about a minute to start
-  again (Render's documentation); warm it before a demo. Whether the free instance type is offered for
-  image-backed services was not confirmed in Render's documentation.
+  again (Render's documentation); warm it before a demo. A free image-backed base service and free-plan previews of it
+  were observed working on 2026-10-12.
 * **Render does not roll back automatically.** A new instance receives no traffic until `/health` passes and the
   old one keeps serving; if the new one never becomes healthy Render cancels the deploy after 15 minutes. A
   broken image that still answers `/health` goes live. Recovery is `rollback.yml`.

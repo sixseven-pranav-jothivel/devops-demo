@@ -101,7 +101,7 @@ Render facts below come from Render's documentation (read 2026-10-10); behaviour
 | Data disappears | Expected: in-memory repository; every restart/deploy/spin-down resets it | The dashboard banner says so. Two instances would also show different data: keep exactly one. |
 | Free hours exhausted | 750 free instance hours per workspace per month shared by all free services | Wait for the next month, suspend unused services, or upgrade. |
 | Health check fails although the container works | Health check path is wrong or the app binds the wrong port | Path `/health`; the app binds `0.0.0.0:$PORT` and Render supplies `PORT` (do not hard-code it). Checks must answer within 5 seconds. |
-| Service does not offer the Free type for an image | Not confirmed in Render's documentation for image-backed services | Choose another instance type; the pipeline does not depend on the plan. |
+| Service does not offer the Free type for an image | A free image-backed service worked on 2026-10-12, but plan availability can change | Choose another instance type; the pipeline does not depend on the plan. |
 
 ## 7. Smoke and performance checks
 
@@ -117,8 +117,7 @@ Render facts below come from Render's documentation (read 2026-10-10); behaviour
 
 ## 8. PR previews (pr-preview.yml)
 
-All **(from the code/docs)**; the feature was **NOT VERIFIED** on GitHub or Render. Render API facts come from
-the comments in `scripts/deploy/preview_lib.py` (Render's OpenAPI document and service-previews page).
+The label-then-close path was observed on GitHub and Render on 2026-10-12 (PR #3, runs 38209130008 and 38209469656). The other rows are **from the code/docs, NOT VERIFIED** live (the `unlabeled` and `synchronize` paths, the cleanup race branches, the fork/Dependabot guards on real events and the gate timeout). Render API facts come from the comments in `scripts/deploy/preview_lib.py` (Render's OpenAPI document and service-previews page).
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -127,9 +126,11 @@ the comments in `scripts/deploy/preview_lib.py` (Render's OpenAPI document and s
 | Sticky comment says `No preview` / `quality-gate FAILED for this commit` | The gate for the head commit is red (for example a `demo/<scenario>` defect PR) | Fix the PR; the next push re-runs. A preview never deploys from a red gate. |
 | `gate` job times out | `quality-gate` never appeared or took more than the 25-minute wait | Check that `ci` ran for the head commit; push again. |
 | Comment says `No preview: image build, scan or publish failed` | The image build, the container smoke test or image guards, the Trivy image gate or the GHCR push failed | Open the `build-scan`/`publish` job logs; same causes as for the release image (sections 2, 3 and 5). |
-| `Preview deployment FAILED`, image published | Render API error: invalid key or service id, base service is not image-backed, plan not allowed, `imagePath` with `@sha256` digest rejected (unconfirmed), deploy not live in time | Read the `preview` job log (the key is masked). Set `PREVIEW_PLAN` if the plan is the issue. If the digest form is rejected, this needs a code change (report it); do not work around it with a mutable tag. |
+| `Preview deployment FAILED`, image published | Render API error: invalid key or service id, base service is not image-backed, plan not allowed, deploy not live in time (the `@sha256` digest form of `imagePath` and a free-plan preview of a free base service were accepted on 2026-10-12) | Read the `preview` job log (the key is masked). Set `PREVIEW_PLAN` if the plan is the issue. Do not work around a digest problem with a mutable tag; report it. |
 | Preview smoke test fails: `git_sha mismatch` | Old image still serving, or the deploy did not take the new digest | Wait for the retry window; check the preview's Events in Render. |
-| Preview dashboard says environment `production` | Previews copy the base service's settings including env vars (documented by Render; the app prints `DEPLOY_ENVIRONMENT`) | Expected; not a production deployment. |
+| Preview dashboard or `/api/version` says environment `production` | Previews inherit the base service's env vars (confirmed 2026-10-12) | Expected cosmetic limitation; the version string `<version>-pr<n>` and the PR head sha identify the preview. |
+| Extra `pr-preview` run for every closed PR | `closed` always starts the cleanup path; it exits quickly when there was no preview | Expected. |
+| `gh secret set ... --env production` worked but the preview still says not configured | GitHub secrets cannot be read back or copied between environments; `preview` needs its own `RENDER_API_KEY` and `RENDER_SERVICE_ID` | `gh secret set RENDER_API_KEY --env preview` and `gh secret set RENDER_SERVICE_ID --env preview`. |
 | Preview data differs from production / resets | Each preview is its own service with in-memory data | Expected. |
 | Comment says `Preview cleanup FAILED` | Cleanup job error (API key revoked, Render outage) | Delete the Render service `stockflow-pr-<n>` by hand in the dashboard; Render never deletes image previews itself. |
 | Previews pile up in Render | PRs closed while Actions was disabled, or cleanup failed | List services named `stockflow-pr-*` in Render and delete the ones whose PR is closed. |

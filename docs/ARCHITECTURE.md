@@ -627,12 +627,10 @@ coverage and `--cov-fail-under` taken from the policy.
 Hermetic: no network, no shared state, SQLite in `tmp_path`, frozen clock where time is asserted.
 Coverage `source=app` only, branch coverage, `fail_under = 85` (policy-mirrored).
 
-Measured on 2026-10-11 (`uv run pytest -q --collect-only`): **1431 tests**: unit 469, integration 845 (of
-which concurrency 18), demo 117; 469 + 845 + 117 = 1431, i.e. every test carries exactly one of unit /
-integration / demo. Last full run with coverage: 1399 passed, **2 failed**
-(`tests/test_quality_policy.py::test_the_policy_check_is_clean_on_the_repository` and
-`::test_cli_check_exit_code_is_zero_on_the_repository`, because the policy rejects the permissions of
-`pr-preview.yml`, see 10.5); branch coverage 100.00 % over 849 statements / 104 branches.
+Measured on 2026-10-12 (`uv run pytest -q --cov`): **1431 tests, all passed** in 48 s, branch coverage
+**100.00 %** over 849 statements / 104 branches. Marker counts from `pytest --collect-only -m <marker>`:
+unit 469, integration 845 (of which concurrency 18), demo 117; 469 + 845 + 117 = 1431, i.e. every test carries
+exactly one of unit / integration / demo.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -746,25 +744,38 @@ workflow; the only write permission (`packages: write`) is at job level in `rele
 - Preview-only configuration: environment `preview` holding `RENDER_API_KEY` and `RENDER_SERVICE_ID` (the
   production base service; previews copy it), optional variable `PREVIEW_PLAN`. Restrict the environment with
   deployment-branch and reviewer rules.
-- **Not verified yet**: nothing in this section has run on GitHub or Render (no remote, no credentials);
-  see `docs/IMPLEMENTATION_STATUS.md`.
+- **Verification status** (first real GitHub + Render run, 2026-10-12, facts reported by the orchestrator;
+  the architect did not observe them directly):
+  - VERIFIED: `ci.yml` green on all jobs. `release.yml` green end to end: `build-scan`, `publish` (GHCR
+    push), `deploy` via the hook, Render deploy live, deployed digest checked through Render's deploy
+    history, live `/api/version.git_sha` equals the pushed commit. The Render API polling path (with
+    `RENDER_API_KEY` + `RENDER_SERVICE_ID` in environment `production`) saw `update_in_progress` -> `live`
+    and the image digest matched (run 38206976235).
+  - VERIFIED: pr-preview happy path and close cleanup. PR #3 with label `preview`: run 38209130008 passed
+    `decide`, `gate`, `build-scan`, `publish`, `preview`, `report`; Render created `stockflow-pr-3`
+    (parent = the base service) on the Free plan from an `@sha256` digest `imagePath`, at
+    `https://stockflow-pr-3.onrender.com`, serving version `0.1.0-pr3` and the PR head sha. Closing the PR ran
+    cleanup run 38209469656: the service was deleted (confirmed through the Render API) and the sticky
+    comment read "Preview deleted".
+  - VERIFIED (GitHub-side configuration): branch protection requiring `quality-gate`; environments
+    `production` (main only), `demo-unsafe` (required reviewer) and `preview`; the secrets are set.
+  - Still **NOT VERIFIED** (code and unit tests only): the `unlabeled` cleanup path; `synchronize` redeploying
+    an **existing** preview (`POST /v1/services/{id}/deploys` with `imageUrl`); the cleanup race branches;
+    the fork and Dependabot guards on real events; the `gate` timeout; `rollback.yml`;
+    `demo-unsafe-deploy.yml`; `perf.yml`; the scheduled run of `demo-fixtures.yml`; Dependabot itself.
 
-Render points that are **UNCONFIRMED** for previews (the code fails loudly rather than assuming; all NOT
-VERIFIED against a real account):
-1. Whether an image preview of a **Free**-plan base service may itself be Free. Render only documents that a
-   paid base cannot have Free previews and that image previews are billed by the plan in the request. Hence
-   `PREVIEW_PLAN` is optional and unset (omitted = the base service's plan). Check cost before enabling.
-2. Whether `imagePath` accepts the `repo@sha256:<digest>` form. The API text says only "tag or SHA" must
-   differ from the base image; the deploy hook (which the production pipeline already uses) has the same
-   rule. The workflow's digest-based create depends on this.
-3. The preview URL shape. Documented: previews get their own `onrender.com` URL. The script accepts only
-   `https://<name>.onrender.com` with no path/port and refuses anything else, so a different real shape would
-   make the job fail rather than smoke-test an unknown host.
-4. Inherited environment: previews copy the base service's settings including env vars, so a preview reports
-   `DEPLOY_ENVIRONMENT=production` (and, in-memory, starts with seed data). Whether other inherited env vars
-   or secrets are acceptable for PR code must be reviewed; PR code does run on Render with that config.
-5. Redeploying an existing preview by `imageUrl` requires the host/repository/image name to match the
-   configured image; the PR-number tags satisfy that, but this is untested.
+Render points for previews, as of that run:
+1. **Confirmed**: a preview of the Free-plan base service was created on the **Free** plan. `PREVIEW_PLAN`
+   stays optional and unset (omitted = the base service's plan); a paid base cannot have Free previews.
+2. **Confirmed**: `imagePath` accepts the `repo@sha256:<digest>` form (the preview was created by digest).
+3. **Confirmed**: the preview URL shape is `https://<service-name>.onrender.com` (here
+   `https://stockflow-pr-3.onrender.com`), which is what the script accepts.
+4. **Confirmed (cosmetic)**: the preview inherits the base service's env vars, so it reports
+   `DEPLOY_ENVIRONMENT=production` and starts with seed data. Any *other* inherited env var or secret still
+   needs a review before enabling previews for PRs from many contributors: PR code runs on Render with that
+   configuration.
+5. **Still unconfirmed**: redeploying an existing preview by `imageUrl` (the `synchronize` path; the host,
+   repository and image name must match the configured image, which the `pr-<n>` tags satisfy in theory).
 
 ### 10.5 Trust boundaries of pr-preview.yml
 PR code is untrusted; privileges are split across jobs so no job has both PR code and a secret or write token:
@@ -783,10 +794,9 @@ head SHA; the secrets are readable only by jobs that declare `environment: previ
 pass through environment variables, never command lines. Residual risk (stated in the workflow header): with
 `pull_request` the workflow file itself comes from the PR merge commit, so anyone with write access can change
 it. Mitigate by restricting who can push branches and by deployment-branch/reviewer rules on `preview`.
-Policy note: `pr-preview.yml` needs `packages: write` (publish) and `pull-requests: write` (report); the
-quality policy currently allows `packages: write` only in `release.yml` and `pull-requests` nowhere, so
-`make policy-check` fails until security extends `actions.allowed_job_write_permissions` (see
-`docs/IMPLEMENTATION_STATUS.md`).
+Policy: `pr-preview.yml` needs `packages: write` (`publish`) and `pull-requests: write` (`report`). The
+quality policy now allows exactly those (`actions.allowed_job_write_permissions`: `packages: [release.yml,
+pr-preview.yml]`, `pull-requests: [pr-preview.yml]`) and `make policy-check` passes again.
 
 ### 10.2 Image (`Dockerfile`, devops)
 Multi-stage: `uv` binary stage (pinned version + digest), `base` (`python:3.12-slim@sha256:...`, the single

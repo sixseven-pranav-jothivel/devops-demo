@@ -38,7 +38,11 @@ smoke test -> deployment record -> manual rollback by digest. k6 for load tests.
   head SHA) creates a per-PR Render image preview by digest and deletes it on close/unlabel. Trust split:
   `build-scan` runs PR code with no secrets; `publish` has `packages: write` and loads a sha256-verified
   tarball; `preview`/`cleanup` hold the Render secrets (environment `preview`) and run base-branch scripts
-  only; `report` has `pull-requests: write`. Everything Render/GitHub-side is NOT VERIFIED.
+  only; `report` has `pull-requests: write`.
+  Verified for real (2026-10-12): ci, release (incl. Render API polling, run 38206976235), the preview create
+  and close-cleanup path (PR #3, runs 38209130008 / 38209469656). Still NOT VERIFIED: unlabel cleanup,
+  redeploy of an existing preview, fork/Dependabot guards on real events, gate timeout, rollback.yml,
+  demo-unsafe-deploy.yml, perf.yml, scheduled demo-fixtures.yml, Dependabot.
   A push to main REQUIRES a verified deployment: missing `RENDER_DEPLOY_HOOK_URL` / `vars.STOCKFLOW_BASE_URL`
   fails the `deploy` job (the image is still published to GHCR first). Manual runs default `require_deploy: true`.
   `deployment-record.json` says `deployed: true` only after Render, the smoke test and `verify-deployment` all passed.
@@ -88,7 +92,8 @@ Edit only files you own; ask for other changes in your report. New dependencies:
 
 ## Rules
 - Never fabricate command output, scan results or test results. Run the real tool and report the outcome.
-  Nothing that depends on GitHub or Render is verified until it has run there; say "NOT VERIFIED".
+  Anything that depends on GitHub or Render is unverified until it has run there; say "NOT VERIFIED" and
+  cite the run id once it has.
 - The clean baseline must always pass every gate. Never commit a defect; `make demo-reset` must leave a clean tree.
 - Never weaken scanners, thresholds or policy to make something pass; fix the code. Ignores need a
   justification and an expiry.

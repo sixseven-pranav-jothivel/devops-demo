@@ -1,8 +1,9 @@
 # Setup: GitHub repository and Render service
 
-This is the checklist for the first real run of the pipeline. Honest status: **none of the GitHub or Render
-settings below were exercised from this development VM** (no external accounts may be touched). The workflows,
-scripts and policy were verified locally (actionlint, unit tests of the deploy helpers,
+This is the checklist for the first real run of the pipeline. Honest status: the settings below were **not**
+exercised from the development VM. Two things were later observed for real on GitHub and Render on 2026-10-12 (the
+PR-preview label-then-close path, section 8, and a production release run with Render API polling); everything else
+here is still NOT VERIFIED. The workflows, scripts and policy were verified locally (actionlint, unit tests of the deploy helpers,
 `deploy_render.py --dry-run`, a `--provenance=false` push to a throw-away local registry plus label reading).
 Where this guide relies on documentation of GitHub or Render rather than on something observed, it says so.
 Render facts were read from Render's current documentation on 2026-10-10 (sources at the end); things the
@@ -297,10 +298,9 @@ smoke test or `perf.yml` while the audience is looking at product data you care 
 
 ## 7. What could not be confirmed
 
-* Whether Render's **Free** instance type can be selected for an image-backed (Existing Image) web service: the
-  Free-instances page lists web services generally and does not mention Docker images; a web search suggested
-  it is possible. If Free is not offered, choose the cheapest paid type or deploy a different type; nothing in
-  the pipeline depends on the plan, but `render.yaml` says `plan: free`.
+* Whether Render's **Free** instance type can be selected for an image-backed (Existing Image) web service: its
+  documentation does not say, but a free image-backed base service with free-plan previews was observed working
+  on 2026-10-12.
 * Whether the free tier gets zero-downtime deploys (not stated on the pages read).
 * Render's behaviour when a container **exits** at startup (the `bad_deployment` scenario): the documentation
   describes the 15-minute health-check window; whether Render fails such a deploy sooner is not documented on
@@ -309,10 +309,7 @@ smoke test or `perf.yml` while the audience is looking at product data you care 
   automatic repository link of a package published with the `org.opencontainers.image.source` label; PAT-only
   authentication for `docker login ghcr.io`. These are stated from GitHub's documentation or general knowledge,
   not observed.
-* PR previews (section 8): whether a preview of a **free** base service may itself use the free plan; whether
-  Render's preview API accepts an `imagePath` in the `repo@sha256:<digest>` form (its documentation says only
-  that the tag or SHA may vary); how preview URLs are named; and that previews inherit the base service's
-  environment variables (documented by Render; implies a preview can report `DEPLOY_ENVIRONMENT=production`).
+* PR previews (section 8): the label-then-close path is observed (2026-10-12). Not verified: `unlabeled`, `synchronize` redeploying an existing preview, the cleanup race branches, the fork/Dependabot guards on real events, and the gate timeout.
 * Everything in sections 1, 3 and 4 as a live sequence: no GitHub repository setting, GHCR package, Render
   service, hook call or environment approval was exercised.
 
@@ -322,9 +319,24 @@ Sources (read 2026-10-10): Render docs on deploying an image (`render.com/docs/d
 
 ## 8. Optional: per-PR preview environments
 
-**NOT VERIFIED.** The workflow [`pr-preview.yml`](../.github/workflows/pr-preview.yml) and its scripts
-(`scripts/deploy/preview_tools.py`, `preview_lib.py`) are covered by local unit tests only; nothing has run against
-GitHub or Render. Skip this whole section if you do not want previews; nothing else depends on it.
+**Partly verified.** The workflow [`pr-preview.yml`](../.github/workflows/pr-preview.yml) and its scripts
+(`scripts/deploy/preview_tools.py`, `preview_lib.py`) have unit tests, and the main path was run for real on
+2026-10-12 (below). The remaining paths are NOT VERIFIED. Skip this whole section if you do not want previews;
+nothing else depends on it.
+
+### 8.0 What was observed (2026-10-12, PR #3)
+
+Observed on 2026-10-12 with PR #3 (labelled `preview`, then closed): `pr-preview` run 38209130008 passed every job (`decide`, `gate`, `build-scan`, `publish`, `preview`, `report`); the `gate` job waited for a green `quality-gate`; the sticky comment read "DEPLOYED and verified" with URL `https://stockflow-pr-3.onrender.com`, commit `8cbaf837c419` and digest `sha256:41d40667...`; Render created a separate service `stockflow-pr-3` (parent = the base service) on the **free** plan with `imagePath` `ghcr.io/sixseven-pranav-jothivel/stockflow@sha256:<digest>`; `/api/version` served version `0.1.0-pr3` and the PR head sha; closing the PR started cleanup run 38209469656 (success), the Render service was deleted (checked through the Render API: only the base service remained) and the comment became "Preview deleted".
+
+* Previews **do** inherit the base service's environment variables: the preview reported `environment: production`
+  (confirmed; a cosmetic limitation, not a production deployment).
+* Free-plan previews of a free image-backed base service work, and Render's `imagePath` accepts the `@sha256:<digest>`
+  form.
+* A production release run with Render API polling (`RENDER_API_KEY` and `RENDER_SERVICE_ID` in the `production`
+  environment) was also observed: the poll saw the deploy go `update_in_progress` then `live` and the image digest
+  matched.
+* **Still NOT VERIFIED:** removing the label (`unlabeled`), a new commit redeploying an existing preview
+  (`synchronize`), the cleanup race branches, the fork and Dependabot guards on real events, and the gate timeout.
 
 ### 8.1 What it does
 
@@ -364,6 +376,10 @@ A PR with a red `quality-gate` gets the comment "No preview" instead of a deploy
    gh secret set RENDER_API_KEY    --env preview --repo sixseven-pranav-jothivel/devops-demo
    gh secret set RENDER_SERVICE_ID --env preview --repo sixseven-pranav-jothivel/devops-demo   # srv-... of the BASE (production) service
    ```
+   (Observed 2026-10-12: the secrets were set exactly this way. **GitHub secrets cannot be read back or copied
+   between environments**, so `preview` and `production` each need their own value even though the name and the key
+   may be the same; set each with its own `gh secret set ... --env <name>`.)
+
    Optional variable (leave unset unless Render rejects the default plan):
    `gh variable set PREVIEW_PLAN --env preview --body <plan> --repo sixseven-pranav-jothivel/devops-demo`.
    `RENDER_SERVICE_ID` must be an image-backed service whose image URL is `ghcr.io/sixseven-pranav-jothivel/stockflow`
@@ -377,19 +393,22 @@ A PR with a red `quality-gate` gets the comment "No preview" instead of a deploy
    access list changes. The same `RENDER_API_KEY` secret name in the `production` environment is a separate,
    optional secret used only to poll deploy status.
 5. **GHCR**: the preview tags go into the same public package; Render pulls the digest anonymously.
-6. **Cost and plan.** Each preview is an extra Render service billed by plan. Whether a preview of a free base
-   service can be on the free plan is **not confirmed**; Render documents that previews of a base service on a
-   paid plan cannot use the free plan. If creation fails on the plan, set `PREVIEW_PLAN`.
+6. **Cost and plan.** Each preview is an extra Render service billed by plan. Observed 2026-10-12: a preview of
+   a free image-backed base service was created on the **free** plan with no `PREVIEW_PLAN` set. Render documents that
+   previews of a base service on a paid plan cannot use the free plan; set `PREVIEW_PLAN` if creation fails on the plan.
+7. **Every closed PR starts a `cleanup` run** (it checks for a preview and exits quickly when there is none), so
+   expect one extra `pr-preview` run per closed PR in the Actions list; the `preview` environment secrets are read
+   by that job too.
 
-### 8.3 How to try it (NOT VERIFIED; do it once before relying on it)
+### 8.3 How to try it (steps 1 to 3 and the close in step 5 were observed on 2026-10-12; step 4 and the label-removal route are NOT VERIFIED)
 
 1. Push a branch from this repository with a trivial change and open a PR into `main`.
 2. Add the `preview` label. The `pr-preview` run starts; wait for `quality-gate`, then the build, publish and
    `preview` jobs. With no secrets yet configured this ends in `NOT DEPLOYED: preview not configured`: that is the
    expected unconfigured result.
 3. After configuring the secrets, re-run failed jobs: the sticky comment should show `DEPLOYED and verified`, the
-   commit, the image digest and a preview URL (an `onrender.com` address; the URL naming is unconfirmed). Open it
+   commit, the image digest and the preview URL `https://stockflow-pr-<n>.onrender.com` (observed shape). Open it
    and check `/api/version` shows the PR head sha.
 4. Push another commit: the same preview is redeployed to the new digest.
 5. Remove the label or close the PR: `cleanup` runs, the comment says `Preview deleted`, and the service
-   `stockflow-pr-<n>` disappears from the Render dashboard (what to expect, not observed).
+   `stockflow-pr-<n>` is deleted from Render (observed for closing the PR; removing the label is the same job path but was not exercised).
