@@ -139,3 +139,4 @@ The label-then-close path was observed on GitHub and Render on 2026-10-12 (PR #3
 
 <!-- lifecycle test 1 -->
 <!-- lifecycle test 2 -->
+<!-- lifecycle test 3 -->
