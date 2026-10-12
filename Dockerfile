@@ -49,10 +49,13 @@ COPY app/ ./app/
 ARG APP_VERSION=0.0.0-dev
 ARG GIT_SHA=unknown
 ARG BUILD_TIME=
+# The environment name shown in the UI and /api/version. Production images keep the default; the PR preview
+# build passes preview-pr-<n> so a preview never reports itself as production.
+ARG DEPLOY_ENVIRONMENT=production
 ENV APP_VERSION=${APP_VERSION} \
     GIT_SHA=${GIT_SHA} \
     BUILD_TIME=${BUILD_TIME} \
-    DEPLOY_ENVIRONMENT=production \
+    DEPLOY_ENVIRONMENT=${DEPLOY_ENVIRONMENT} \
     PORT=8000 \
     PATH=/opt/venv/bin:${PATH} \
     PYTHONDONTWRITEBYTECODE=1 \

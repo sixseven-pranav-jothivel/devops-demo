@@ -24,6 +24,7 @@ IMAGE ?= stockflow:local
 CONTAINER ?= stockflow-local
 HOST_PORT ?= 8000
 PLATFORM = $(shell $(POLICY) get trivy.image.platform)
+DEPLOY_ENVIRONMENT ?= production
 APP_VERSION ?= $(shell $(UV) run python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
 # 40 zeros when git has no commit yet (the smoke test refuses the literal "unknown").
 GIT_SHA ?= $(shell git rev-parse --verify --quiet HEAD || echo 0000000000000000000000000000000000000000)
@@ -127,7 +128,7 @@ quality: lint format-check typecheck test-coverage security ## Everything that m
 # ---------------------------------------------------------------- container
 docker-build: ## Build the linux/amd64 image (IMAGE=stockflow:local), loaded into the local daemon
 	$(DOCKER) buildx build --platform $(PLATFORM) --load -t $(IMAGE) \
-		--build-arg APP_VERSION=$(APP_VERSION) --build-arg GIT_SHA=$(GIT_SHA) --build-arg BUILD_TIME=$(BUILD_TIME) \
+		--build-arg APP_VERSION=$(APP_VERSION) --build-arg GIT_SHA=$(GIT_SHA) --build-arg BUILD_TIME=$(BUILD_TIME) --build-arg DEPLOY_ENVIRONMENT=$(DEPLOY_ENVIRONMENT) \
 		$(if $(IMAGE_SOURCE),--label org.opencontainers.image.source=$(IMAGE_SOURCE)) .
 
 docker-run: ## Run the image in the foreground on http://localhost:$(HOST_PORT)

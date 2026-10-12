@@ -120,7 +120,7 @@ jobs:
       - name: Build linux/amd64 (no push)
         run: |
           version="$(uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")"
-          APP_VERSION="${version}-pr${PR_NUMBER}" make docker-build IMAGE="$PREVIEW_IMAGE"
+          APP_VERSION="${version}-pr${PR_NUMBER}" DEPLOY_ENVIRONMENT="preview-pr-${PR_NUMBER}" make docker-build IMAGE="$PREVIEW_IMAGE"
       - name: Run the image, smoke test it, image guards, graceful stop
         run: scripts/deploy/docker_test.sh "$PREVIEW_IMAGE" "$GIT_SHA"
       - name: Save the exact image that will be scanned and published

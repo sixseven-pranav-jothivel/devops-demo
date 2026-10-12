@@ -111,3 +111,21 @@ def test_jobs_are_guarded_against_forks_and_dependabot(wf: dict[str, Any]) -> No
 def test_cleanup_reports_whether_it_deleted_something(wf: dict[str, Any]) -> None:
     assert wf["jobs"]["cleanup"]["outputs"]["deleted"] == "${{ steps.cleanup.outputs.deleted }}"
     assert "cleanup" in step_ids(wf, "cleanup")
+
+
+def test_preview_image_is_not_labelled_production(wf: dict[str, Any]) -> None:
+    """A preview must report preview-pr-<n>, never the image's production default."""
+    build = next(
+        s for s in steps(wf, "build-scan") if s.get("name", "").startswith("Build linux/amd64")
+    )
+    assert 'DEPLOY_ENVIRONMENT="preview-pr-${PR_NUMBER}"' in build["run"]
+    assert "make docker-build" in build["run"]
+
+
+def test_environment_name_is_a_dockerfile_build_arg() -> None:
+    root = Path(__file__).resolve().parents[2]
+    dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+    assert "ARG DEPLOY_ENVIRONMENT=production" in dockerfile
+    assert "DEPLOY_ENVIRONMENT=${DEPLOY_ENVIRONMENT}" in dockerfile
+    makefile = (root / "Makefile").read_text(encoding="utf-8")
+    assert "--build-arg DEPLOY_ENVIRONMENT=$(DEPLOY_ENVIRONMENT)" in makefile
