@@ -1,0 +1,38 @@
+name: demo-fixtures
+
+# Weekly proof that the defect-injection fixtures still trigger the real scanners. The advisories behind
+# bad_dependency / bad_container live in external databases (a CVE can be withdrawn or re-scored, a base image
+# tag removed); this fails loudly instead of letting a demo silently pass its gate. Read-only: no secrets,
+# no deploy, no package access, nothing is injected into the tree (it dry-runs the patches).
+
+on:
+  schedule:
+    - cron: "17 5 * * 1" # Mondays 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-fixtures
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate-fixtures:
+    name: validate-fixtures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      UV_FROZEN: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - uses: ./.github/actions/setup-trivy
+      - name: Validate fixtures against the real scanners
+        run: make demo-fixtures

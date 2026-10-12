@@ -1,0 +1,64 @@
+<!doctype html>
+{#-
+  StockFlow base layout.
+  No build step: app/static/css/app.css and app/static/js/app.js are handwritten, committed and served as-is
+  from /static. No CDN, no Node, no bundler. No inline scripts, styles or event handlers (CSP friendly).
+  Jinja2 autoescaping is on for .html templates; never mark dynamic values |safe.
+-#}
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="StockFlow inventory and order dashboard (demo, non-persistent data).">
+  <title>{% block title %}StockFlow{% endblock %}</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/css/app.css?v={{ app_version|urlencode }}">
+</head>
+<body data-api-base="/api">
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">SF</span>
+        <span class="brand-name">StockFlow</span>
+      </div>
+      <dl class="release" aria-label="Release information">
+        <div><dt>Version</dt><dd>{{ app_version }}</dd></div>
+        <div><dt>Environment</dt><dd><span class="badge {{ 'badge-env-prod' if deploy_environment == 'production' else 'badge-env' }}">{{ deploy_environment }}</span></dd></div>
+        <div><dt>Commit</dt><dd class="mono">{{ (git_sha or 'unknown')[:7] }}</dd></div>
+      </dl>
+    </div>
+  </header>
+
+  {% if not persistent %}
+  <div class="banner" role="note" id="persistence-banner">
+    <div class="container">
+      <strong>Demo data is not persistent.</strong>
+      Products and orders live in memory only and reset whenever the service restarts or redeploys.
+    </div>
+  </div>
+  {% endif %}
+
+  <main id="main" class="container" tabindex="-1">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <dl class="release release-footer" aria-label="Build details">
+        <div><dt>Version</dt><dd>{{ app_version }}</dd></div>
+        <div><dt>Environment</dt><dd>{{ deploy_environment }}</dd></div>
+        <div><dt>Commit</dt><dd class="mono" title="{{ git_sha }}">{{ (git_sha or 'unknown')[:7] }}</dd></div>
+        <div><dt>Built</dt><dd>{% if build_time %}<time datetime="{{ build_time }}">{{ build_time }}</time>{% else %}n/a{% endif %}</dd></div>
+      </dl>
+      <p class="footer-links"><a href="/api/version">/api/version</a> &middot; <a href="/health">/health</a></p>
+    </div>
+  </footer>
+
+  <div id="toasts" class="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+
+  <script src="/static/js/app.js?v={{ app_version|urlencode }}" defer></script>
+</body>
+</html>

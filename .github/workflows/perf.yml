@@ -1,0 +1,60 @@
+name: perf
+
+# Opt-in k6 load test of the DEPLOYED service. Manual only, never part of the delivery pipeline.
+# The test WRITES data (a dedicated high-stock product and single-unit orders); the production store is
+# in-memory and resets on the next restart, but do not run this during a customer-facing demo.
+# Thresholds and test shape come from config/quality-policy.yaml via `make perf` (load_test.*).
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_writes:
+        description: "Type WRITE to confirm the test creates products and orders on the target"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  k6:
+    name: k6
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CONFIRM: ${{ inputs.confirm_writes }}
+      STOCKFLOW_BASE_URL: ${{ vars.STOCKFLOW_BASE_URL }}
+    steps:
+      - name: Preconditions
+        run: |
+          if [ "$CONFIRM" != "WRITE" ]; then echo "::error::type WRITE to confirm"; exit 1; fi
+          if [ -z "$STOCKFLOW_BASE_URL" ]; then
+            echo "::error title=No target::set the repository variable STOCKFLOW_BASE_URL"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Install k6 (pinned release, sha256 verified)
+        run: |
+          scripts/deploy/install_tool.sh k6 "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: k6 performance test
+        run: make perf BASE_URL="$STOCKFLOW_BASE_URL"
+      - name: Upload k6 summary
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-k6
+          path: reports/k6-summary.json
+          if-no-files-found: warn
+          retention-days: 30

@@ -1,0 +1,146 @@
+name: rollback
+
+# Manual rollback: redeploy an ALREADY PUBLISHED image by digest. Nothing is rebuilt; old commits are never
+# rebuilt. Find the digest in a release-record.json artifact (release.yml, 90 days), in the job summary of
+# the release run, or in the GHCR package page.
+#
+# The workflow (1) checks the digest exists in GHCR and reads the version/sha from the image's OCI labels,
+# (2) sends the digest to the Render deploy hook (same mechanism and same concurrency group as release.yml),
+# (3) verifies /health, /ready and that /api/version.git_sha equals the restored image's sha, (4) records
+# the result. A rollback that cannot run (no hook secret / no base URL) FAILS: silently doing nothing during
+# an incident would be worse than an error.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "Digest of the image to restore: sha256:<64 hex>"
+        type: string
+        required: true
+      reason:
+        description: "Why (recorded in the deployment record)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify-image:
+    name: verify-image
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      version: ${{ steps.inspect.outputs.version }}
+      git_sha: ${{ steps.inspect.outputs.git_sha }}
+    env:
+      INPUT_DIGEST: ${{ inputs.image_digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate the digest format and build the image reference
+        id: ref
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "owner=${owner}" >> "$GITHUB_ENV"
+          python3 scripts/deploy/release_tools.py image-ref --owner "$owner" --digest "$INPUT_DIGEST"
+      - name: Log in to GHCR (read-only token)
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: The digest must exist in GHCR; read its version and git sha from the OCI labels
+        id: inspect
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+        run: python3 scripts/deploy/release_tools.py inspect --image "$IMAGE" --expect-owner "$owner"
+
+  rollback:
+    name: rollback
+    needs: [verify-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: production
+    permissions:
+      contents: read
+    env:
+      IMAGE: ${{ needs.verify-image.outputs.image }}
+      VERSION: ${{ needs.verify-image.outputs.version }}
+      RESTORED_SHA: ${{ needs.verify-image.outputs.git_sha }}
+      DEPLOY_REASON: ${{ inputs.reason }}
+      HOOK_CONFIGURED: ${{ secrets.RENDER_DEPLOY_HOOK_URL != '' }}
+      RENDER_API_CONFIGURED: ${{ secrets.RENDER_API_KEY != '' && secrets.RENDER_SERVICE_ID != '' }}
+      STOCKFLOW_BASE_URL: ${{ vars.STOCKFLOW_BASE_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Is live deployment configured?
+        id: preflight
+        run: python3 scripts/deploy/release_tools.py preflight
+      - name: A rollback that cannot run is a failure
+        if: steps.preflight.outputs.configured != 'true'
+        run: |
+          echo "::error title=Rollback impossible::RENDER_DEPLOY_HOOK_URL (production secret) and STOCKFLOW_BASE_URL (variable) must be configured"
+          exit 1
+      - name: Load smoke settings from the policy
+        run: |
+          echo "SMOKE_TIMEOUT=$(uv run python scripts/quality_policy.py get smoke.timeout_seconds)" >> "$GITHUB_ENV"
+          echo "SMOKE_INTERVAL=$(uv run python scripts/quality_policy.py get smoke.poll_interval_seconds)" >> "$GITHUB_ENV"
+      - name: Redeploy the chosen digest (no rebuild)
+        id: deploy
+        if: steps.preflight.outputs.configured == 'true'
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          python3 scripts/deploy/deploy_render.py --image "$IMAGE" --expect-owner "$GITHUB_REPOSITORY_OWNER" \
+            --wait-timeout "$SMOKE_TIMEOUT" --wait-interval "$SMOKE_INTERVAL"
+      - name: Verify the restored image is serving (/api/version.git_sha == the image's sha) and smoke test
+        id: verify
+        if: steps.preflight.outputs.configured == 'true'
+        env:
+          BASE_URL: ${{ steps.preflight.outputs.base_url }}
+        run: python3 scripts/smoke_test.py --base-url "$BASE_URL" --expect-sha "$RESTORED_SHA" --timeout "$SMOKE_TIMEOUT"
+      - name: Record the rollback
+        if: always()
+        env:
+          CONFIGURED: ${{ steps.preflight.outputs.configured }}
+          BASE_URL: ${{ steps.preflight.outputs.base_url }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        run: |
+          set -euo pipefail
+          configured=false
+          if [ "$CONFIGURED" = "true" ]; then configured=true; fi
+          python3 scripts/deploy/release_tools.py record --kind rollback --image "$IMAGE" --version "$VERSION" \
+            --git-sha "$RESTORED_SHA" --base-url "$BASE_URL" --configured "$configured" \
+            --deploy-outcome "$DEPLOY_OUTCOME" --verify-outcome "$VERIFY_OUTCOME" \
+            --out reports/rollback-record.json
+      - name: Upload rollback record (kept 90 days)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rollback-record
+          path: |
+            reports/rollback-record.json
+            reports/deploy-result.json
+          if-no-files-found: warn
+          retention-days: 90

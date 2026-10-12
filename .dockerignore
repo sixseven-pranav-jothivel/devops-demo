@@ -1,0 +1,11 @@
+# Allow-list: everything is excluded unless re-included below, so demo/, tests/, load-tests/, docs/,
+# .github/, .demo-state/, reports/, .git/, .venv/, .env, caches and local databases never reach the build.
+*
+!app
+!pyproject.toml
+!uv.lock
+# Re-exclude build products inside the allowed paths.
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store
+**/*.demo-tmp

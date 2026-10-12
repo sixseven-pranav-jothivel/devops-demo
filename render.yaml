@@ -1,0 +1,23 @@
+# Render Blueprint for the image-backed StockFlow web service (optional: the same settings can be made in the
+# dashboard; see docs/SETUP_GITHUB_RENDER.md). Replace OWNER with the lowercase GitHub owner of the repository.
+#
+# Deploys are NOT automatic: Render never redeploys an image-backed service when a new image appears. The
+# release workflow triggers the service's deploy hook with imgURL=ghcr.io/OWNER/stockflow@sha256:<digest>.
+# Render requires everything in imgURL except the tag/digest to equal the image URL below, so keep the
+# registry and repository identical to what release.yml pushes. The tag below is only the service's default
+# (used by manual deploys without imgURL); production deploys always name a digest.
+services:
+  - type: web
+    name: stockflow
+    runtime: image
+    image:
+      url: ghcr.io/OWNER/stockflow:0.1.0
+    plan: free
+    region: oregon
+    numInstances: 1 # in-memory data: exactly one instance, state resets on every deploy/restart
+    healthCheckPath: /health
+    envVars:
+      - key: DEPLOY_ENVIRONMENT
+        value: production
+      - key: REPOSITORY_BACKEND
+        value: memory

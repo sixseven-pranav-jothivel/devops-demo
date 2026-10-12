@@ -1,0 +1,15 @@
+# Bandit configuration for StockFlow (owner: security).
+#
+# Severity/confidence thresholds are NOT set here: they are CLI flags generated from
+# config/quality-policy.yaml (`python scripts/quality_policy.py args bandit`).
+# This file only holds tool behaviour that has no CLI equivalent.
+#
+# Policy: no global test skips. A false positive is suppressed at the offending line with
+#   # nosec B### - <reason>
+# so the exception is reviewed in the diff next to the code. `scripts/quality_policy.py check`
+# fails if this file contains a non-empty `skips:`.
+exclude_dirs:
+  - .venv
+  - .demo-state
+  - reports
+skips: []

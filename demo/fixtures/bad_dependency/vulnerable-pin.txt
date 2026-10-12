@@ -1,0 +1,5 @@
+# Fixture for `python demo/inject.py --validate-fixtures`. Deliberately NOT named requirements.txt so that
+# `trivy fs .` (analyzer matches that exact filename) does not flag the clean tree. Never installed/packaged.
+# python-multipart 0.0.6 carries CVE-2024-24762 / GHSA-2jv5-9r88-3w3p (ReDoS in Content-Type parsing,
+# HIGH, fixed in 0.0.7) plus later advisories. Pure Python, tiny, no transitive dependencies.
+python-multipart==0.0.6

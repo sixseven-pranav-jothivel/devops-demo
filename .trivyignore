@@ -1,0 +1,11 @@
+# Trivy ignore list for StockFlow (owner: security). Empty by design.
+#
+# Every entry MUST be a block of exactly this shape, enforced by `python scripts/quality_policy.py check`:
+#
+#   # justification: <why this is not exploitable / no fix exists, and what the mitigation is>
+#   # owner: <github handle or role>   (optional, recommended)
+#   CVE-YYYY-NNNN exp:YYYY-MM-DD
+#
+# - `exp:` is Trivy's native expiry syntax: once the date passes, Trivy stops ignoring the finding
+#   and `check` fails earlier (also fails on any entry expiring more than trivy.ignore_max_days ahead).
+# - Never add a blanket path or a wildcard. One id per line.

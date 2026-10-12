@@ -1,0 +1,11 @@
+{% from "partials/_macros.html" import money, timestamp, iso %}
+{#- Initial rows for the recent-orders table. static/js/app.js re-renders the same structure from /api/orders. -#}
+{% for o in recent_orders %}
+<tr data-id="{{ o.id }}">
+  <td data-label="Order" class="strong">#{{ o.id }}</td>
+  <td data-label="Placed"><time datetime="{{ iso(o.created_at) }}">{{ timestamp(o.created_at) }}</time></td>
+  <td data-label="Items" class="num">{{ o.line_items|length }}</td>
+  <td data-label="Total" class="num strong">{{ money(o.total) }}</td>
+  <td class="actions"><button type="button" class="btn btn-sm" data-action="view-order" data-id="{{ o.id }}" aria-label="View order {{ o.id }}">View</button></td>
+</tr>
+{% endfor %}

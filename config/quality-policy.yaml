@@ -1,0 +1,115 @@
+# StockFlow quality & security policy - the SINGLE source of truth for every gate threshold.
+# Owner: security agent. Read via `python scripts/quality_policy.py get <dotted.key>` /
+# `python scripts/quality_policy.py args <tool>`; validated by `python scripts/quality_policy.py check`.
+#
+# Rules
+#  * Never type a threshold anywhere else (Makefile, workflows, scripts). The only mirror that must
+#    exist is [tool.coverage.report] fail_under in pyproject.toml (QA); `check` enforces equality.
+#  * Never weaken a value to make a gate pass: fix the code. `check` also enforces floors (see
+#    FLOORS in scripts/quality_policy.py) so a quiet downgrade fails CI.
+#  * Every ignore/exception needs id + reason + expires (ISO date, not in the past, within the
+#    *_max_days window). Expired entries fail `check` and therefore CI.
+#  * YAML duplicate keys are an error (a duplicate would silently override a threshold).
+version: 1
+
+python:
+  version: "3.12"            # must equal .python-version (major.minor) and satisfy requires-python
+
+coverage:
+  fail_under: 85             # percent; mirrored (and checked) in pyproject [tool.coverage.report]
+  branch: true               # branch coverage on; mirrored in pyproject [tool.coverage.run]
+  source: [app]
+
+ruff:
+  paths: ["."]
+  check: true
+  format_check: true         # rule selection lives in pyproject.toml
+
+mypy:
+  strict: true               # mirrored in pyproject [tool.mypy]
+  paths: [app, demo]
+
+bandit:
+  paths: [app]               # production code only; tests/demo are not shipped
+  config: config/bandit.yaml
+  # Report AND fail at this severity or above, restricted to this confidence or above.
+  # medium/medium is a superset of "high severity + high confidence": nothing high is ever
+  # tolerated, and medium findings (e.g. B104 bind-all, B108 tmp paths) are also blocking.
+  severity: medium
+  confidence: medium
+  fail_on_findings: true
+  # Suppressing a finding = inline `# nosec B### - reason` next to the code (reviewed in the diff).
+  # Global skips are forbidden (config/bandit.yaml must keep `skips: []`).
+
+pip_audit:
+  scope: runtime+dev         # `uv export --all-groups`: dev tooling is attack surface in CI too
+  requirements_file: reports/requirements-audit.txt
+  fail_on_any: true          # ANY known vulnerability fails, regardless of severity
+  # Documented ignore mechanism. Each entry: {id: GHSA-/PYSEC-/CVE-..., reason: "...", expires: YYYY-MM-DD}
+  # Entries are turned into `--ignore-vuln <id>` by `args pip-audit`. Expired entries fail `check`
+  # and are NOT passed to pip-audit, so the gate fails on its own as well.
+  ignore: []
+  ignore_max_days: 90        # an entry may not expire more than this many days from today
+
+trivy:
+  scanners_fs: [vuln, secret]  # fs scan: dependency vulns (uv.lock) + secrets. Misconfig is a separate scan.
+  skip_dirs: [.venv, .git, .mypy_cache, .ruff_cache, .pytest_cache, .demo-state, reports, htmlcov]
+  fs:
+    severities: [HIGH, CRITICAL]
+    # Strict: Python dependencies are ours to upgrade; an unfixed HIGH in a dependency is also
+    # caught (and blocked) by pip-audit above.
+    ignore_unfixed: false
+    include_dev_deps: true     # same scope as pip_audit.scope=runtime+dev (trivy skips dev deps by default)
+    exit_code: 1
+  image:
+    severities: [HIGH, CRITICAL]
+    # JUSTIFIED DEVIATION (docs/SECURITY.md section 7.2): the OS layer of the pinned base image
+    # regularly carries HIGH findings with status `affected`/`fix_deferred` and NO fixed version
+    # (verified 2026-10-10: python:3.12-slim = 44 such HIGH findings, 0 with a fix). With
+    # ignore_unfixed=false the clean baseline could never pass and the team could do nothing about it.
+    # With true, every finding that HAS a fix still blocks (a stale base tag fails hard), and the
+    # complete list including unfixed findings is produced by `args trivy-image-report`
+    # (non-blocking, uploaded as an artifact) so nothing is hidden. This is the only relaxation.
+    ignore_unfixed: true
+    exit_code: 1
+    platform: linux/amd64
+    scanners: [vuln, secret]   # public GHCR package: also fail if a secret ever lands in an image layer
+  config:                      # Dockerfile / IaC misconfiguration scan (`trivy config`)
+    severities: [HIGH, CRITICAL]
+    exit_code: 1
+    paths: ["."]               # trivy config scans a directory: Dockerfile, compose, workflows, ...
+  report_formats: [table, json]   # SARIF upload needs security-events: write, which policy forbids
+  ignorefile: .trivyignore     # every entry: id + `# justification:` comment + `exp:YYYY-MM-DD`
+  ignore_max_days: 90
+  config_file: config/trivy.yaml
+
+actions:
+  pin_to_full_sha: true        # every third-party `uses:` must be a 40-hex commit SHA (comment the tag)
+  default_permissions:         # workflow top-level `permissions:` must equal exactly this
+    contents: read
+  forbid_triggers: [pull_request_target]
+  # Which workflow files may hold each WRITE permission, at JOB level only (never top level).
+  # Any write permission not listed here (or in a file not listed) fails `check`.
+  allowed_job_write_permissions:
+    packages: [release.yml]    # push image to GHCR
+    # contents / id-token / pull-requests / actions / security-events: none allowed
+  forbid_continue_on_error: true   # no `continue-on-error: true` anywhere in .github/workflows
+  # Any `secrets.X` other than GITHUB_TOKEN may only be read by a job that declares `environment:`
+  # (so the secret lives in an environment, can be gated by reviewers and branch rules).
+  secrets_require_environment: true
+  # Workflows that must never reference a non-GITHUB_TOKEN secret (fork-reachable or reusable):
+  secret_free_workflows: [ci.yml, perf.yml, demo-fixtures.yml]
+
+smoke:
+  timeout_seconds: 600
+  poll_interval_seconds: 10
+
+load_test:
+  p95_ms: 500                  # http_req_duration p(95) < 500 ms
+  error_rate_max: 0.01         # http_req_failed rate < 1 %
+  vus: 10
+  duration: "30s"
+
+# Files scanned by `check` for hard-coded gate values that bypass this policy.
+drift_scan:
+  paths: [Makefile, .github/workflows, scripts/deploy]

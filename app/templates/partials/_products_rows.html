@@ -1,0 +1,17 @@
+{% from "partials/_macros.html" import money, stock_badge %}
+{#- Initial (no-JS / first paint) rows. static/js/app.js re-renders the same structure from /api/products. -#}
+{% for p in products %}
+<tr data-id="{{ p.id }}"{% if not p.active %} class="is-inactive"{% endif %}>
+  <td data-label="SKU" class="mono">{{ p.sku }}</td>
+  <td data-label="Product"><span class="strong">{{ p.name }}</span>{% if p.description %}<span class="sub">{{ p.description }}</span>{% endif %}</td>
+  <td data-label="Category">{{ p.category }}</td>
+  <td data-label="Price" class="num">{{ money(p.price) }}</td>
+  <td data-label="Stock" class="num"><span class="qty">{{ p.quantity_in_stock }}</span> {{ stock_badge(p.quantity_in_stock, metrics.low_stock_threshold) }}</td>
+  <td data-label="Status">{% if p.active %}<span class="badge badge-ok">Active</span>{% else %}<span class="badge badge-muted">Inactive</span>{% endif %}</td>
+  <td class="actions">
+    <button type="button" class="btn btn-sm" data-action="edit" data-id="{{ p.id }}" aria-label="Edit {{ p.name }}">Edit</button>
+    <button type="button" class="btn btn-sm" data-action="stock" data-id="{{ p.id }}" aria-label="Adjust stock for {{ p.name }}">Stock</button>
+    {% if p.active %}<button type="button" class="btn btn-sm btn-primary-outline" data-action="add-to-order" data-id="{{ p.id }}" aria-label="Add {{ p.name }} to order">Add to order</button>{% endif %}
+  </td>
+</tr>
+{% endfor %}

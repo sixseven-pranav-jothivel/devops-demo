@@ -1,0 +1,305 @@
+name: release
+
+# main -> quality gates (ci.yml, re-run for this exact commit) -> build linux/amd64 -> Trivy gate on the exact
+# image -> push to GHCR by sha/version tag and capture the DIGEST -> deploy that digest to Render through the
+# deploy hook -> verify /health, /ready and /api/version == this commit -> deployment record.
+#
+# Deployment is MANDATORY on every push to main. A run can only end green after the deploy was triggered,
+# Render reported THIS deploy live (when the Render API credentials exist), the smoke test passed for this
+# commit, and the release record, the digest sent to Render and the serving /api/version all agree.
+# A hook answering 200 is "accepted", never "deployed".
+#
+# If the target is not configured (no RENDER_DEPLOY_HOOK_URL secret / no STOCKFLOW_BASE_URL variable) the
+# build, scan and GHCR publish still happen first and independently (the image must exist so the Render
+# service can be created from it), then the deploy job FAILS naming exactly what is missing. After the
+# service and secrets exist, re-run with workflow_dispatch (docs/SETUP_GITHUB_RENDER.md). Only a manual run
+# may opt out, by setting require_deploy to false; the record then says deployed=false and the summary says so.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      require_deploy:
+        description: "Fail when the Render hook or STOCKFLOW_BASE_URL is not configured (set false only to publish an image without deploying)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false # deploys queue; they never overlap and are never cut short
+
+env:
+  UV_FROZEN: "1"
+  PYTHONUNBUFFERED: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # The quality gates for the exact commit being released (no secrets are passed to the called workflow).
+  ci:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build-scan:
+    name: build-scan
+    needs: [ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      GIT_SHA: ${{ github.sha }}
+      IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+      RELEASE_IMAGE: stockflow:release
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      build_time: ${{ steps.meta.outputs.build_time }}
+      image_sha256: ${{ steps.tar.outputs.image_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - uses: ./.github/actions/setup-trivy
+      - name: Release metadata
+        id: meta
+        run: |
+          version="$(uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Build linux/amd64 (no push)
+        env:
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+          BUILD_TIME: ${{ steps.meta.outputs.build_time }}
+        run: make docker-build IMAGE="$RELEASE_IMAGE"
+      - name: Run the image, smoke test it, image guard, graceful stop
+        run: scripts/deploy/docker_test.sh "$RELEASE_IMAGE" "$GIT_SHA"
+      - name: Save the exact image that will be scanned and published
+        id: tar
+        run: |
+          make docker-save IMAGE="$RELEASE_IMAGE" SAVE_PLATFORM_FLAG=
+          echo "image_sha256=$(sha256sum reports/image.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Trivy image gate on the exact image (+ full non-blocking report)
+        run: make trivy-image-tar
+      - name: Job summary
+        if: always()
+        run: scripts/deploy/summarize.sh "Trivy image scan (release candidate)" reports/trivy-image.txt 25
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-release-trivy-image
+          path: |
+            reports/trivy-image.txt
+            reports/trivy-image-full.json
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Hand the scanned image to the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-image-tar
+          path: reports/image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  # Only job with packages: write. It checks out no application code to build; it pushes the image the
+  # previous job scanned (docker load of the saved tarball), so what is published is what passed Trivy.
+  publish:
+    name: publish
+    needs: [build-scan]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.build-scan.outputs.version }}
+      BUILD_TIME: ${{ needs.build-scan.outputs.build_time }}
+      EXPECTED_TAR_SHA256: ${{ needs.build-scan.outputs.image_sha256 }}
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      digest: ${{ steps.digest.outputs.digest }}
+      version: ${{ needs.build-scan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the scanned image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-image-tar
+          path: reports
+      - name: Verify the tarball is the one build-scan scanned (sha256), then load it
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$EXPECTED_TAR_SHA256" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::build-scan did not report a valid image sha256"
+            exit 1
+          fi
+          echo "${EXPECTED_TAR_SHA256}  reports/image.tar" | sha256sum --check --strict -
+          docker load --input reports/image.tar
+      - name: Log in to GHCR with the job token
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag and push (sha tag first; the digest is the identity, tags are conveniences)
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="ghcr.io/${owner}/stockflow"
+          docker tag stockflow:release "${repo}:sha-${GITHUB_SHA}"
+          docker tag stockflow:release "${repo}:${VERSION}"
+          mkdir -p reports
+          docker push "${repo}:sha-${GITHUB_SHA}" | tee reports/push-sha.txt
+          docker push "${repo}:${VERSION}" | tee reports/push-version.txt
+          echo "repo=${repo}" >> "$GITHUB_ENV"
+          echo "owner=${owner}" >> "$GITHUB_ENV"
+      - name: Capture the digest the registry reports
+        id: digest
+        run: |
+          set -euo pipefail
+          # push-digest prints digest=sha256:... and appends it to $GITHUB_OUTPUT; the second call must agree
+          GITHUB_OUTPUT=/dev/null python3 scripts/deploy/release_tools.py push-digest reports/push-version.txt > reports/digest-version.env
+          python3 scripts/deploy/release_tools.py push-digest reports/push-sha.txt | tee reports/digest-sha.env
+          if ! diff reports/digest-sha.env reports/digest-version.env; then
+            echo "::error::the sha tag and the version tag resolved to different digests"
+            exit 1
+          fi
+      - name: Build the deployable reference ghcr.io/<owner>/stockflow@sha256:<digest>
+        id: ref
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: python3 scripts/deploy/release_tools.py image-ref --owner "$owner" --digest "$DIGEST"
+      - name: Verify what the registry serves for that digest (labels must name this commit)
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+        run: |
+          set -euo pipefail
+          python3 scripts/deploy/release_tools.py inspect --image "$IMAGE" --expect-owner "$owner" | tee reports/inspect.txt
+          grep -qx "git_sha=${GITHUB_SHA}" reports/inspect.txt
+          grep -qx "version=${VERSION}" reports/inspect.txt
+      - name: Write release-record.json
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+        run: |
+          python3 scripts/deploy/release_tools.py publish-record --image "$IMAGE" --version "$VERSION" \
+            --git-sha "$GITHUB_SHA" --tags "sha-${GITHUB_SHA},${VERSION}" --build-time "$BUILD_TIME" \
+            --out reports/release-record.json
+      - name: Upload release record (the rollback source of truth, kept 90 days)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-record
+          path: reports/release-record.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  deploy:
+    name: deploy
+    needs: [publish] # publish never depends on deploy: the image is in GHCR even when this job fails
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: production
+    permissions:
+      contents: read
+    env:
+      IMAGE: ${{ needs.publish.outputs.image }}
+      VERSION: ${{ needs.publish.outputs.version }}
+      # Mandatory on push; on manual runs it follows the input (default true).
+      DEPLOY_REQUIRED: ${{ github.event_name == 'push' || inputs.require_deploy == true }}
+      # Presence flags only: the secrets themselves are exposed to the single step that needs them.
+      HOOK_CONFIGURED: ${{ secrets.RENDER_DEPLOY_HOOK_URL != '' }}
+      RENDER_API_CONFIGURED: ${{ secrets.RENDER_API_KEY != '' && secrets.RENDER_SERVICE_ID != '' }}
+      STOCKFLOW_BASE_URL: ${{ vars.STOCKFLOW_BASE_URL }}
+    outputs:
+      deployed: ${{ steps.record.outputs.deployed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Is live deployment configured? (fails when it is required and something is missing)
+        id: preflight
+        run: python3 scripts/deploy/release_tools.py preflight
+      - name: Fetch the release record published by this run
+        if: steps.preflight.outputs.configured == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-record
+          path: reports/release
+      - name: Load smoke settings from the policy
+        if: steps.preflight.outputs.configured == 'true'
+        run: |
+          echo "SMOKE_TIMEOUT=$(uv run python scripts/quality_policy.py get smoke.timeout_seconds)" >> "$GITHUB_ENV"
+          echo "SMOKE_INTERVAL=$(uv run python scripts/quality_policy.py get smoke.poll_interval_seconds)" >> "$GITHUB_ENV"
+      - name: Trigger the Render deploy for the exact digest (and wait for it to be live when the API is configured)
+        id: deploy
+        if: steps.preflight.outputs.configured == 'true'
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          python3 scripts/deploy/deploy_render.py --image "$IMAGE" --expect-owner "$GITHUB_REPOSITORY_OWNER" \
+            --wait-timeout "$SMOKE_TIMEOUT" --wait-interval "$SMOKE_INTERVAL"
+      - name: Smoke test - /health, /ready, /api/version.git_sha == this commit, order round trip
+        id: smoke
+        if: steps.preflight.outputs.configured == 'true'
+        env:
+          BASE_URL: ${{ steps.preflight.outputs.base_url }}
+        run: python3 scripts/smoke_test.py --base-url "$BASE_URL" --expect-sha "$GITHUB_SHA" --timeout "$SMOKE_TIMEOUT"
+      - name: Assert release record == digest sent to Render == what is serving (sha and version)
+        id: assert
+        if: steps.preflight.outputs.configured == 'true'
+        env:
+          BASE_URL: ${{ steps.preflight.outputs.base_url }}
+        run: |
+          python3 scripts/deploy/release_tools.py verify-deployment --release-record reports/release/release-record.json \
+            --image "$IMAGE" --expect-sha "$GITHUB_SHA" --expect-version "$VERSION" --base-url "$BASE_URL"
+      - name: Record the deployment result
+        id: record
+        if: always()
+        env:
+          CONFIGURED: ${{ steps.preflight.outputs.configured }}
+          BASE_URL: ${{ steps.preflight.outputs.base_url }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+          ASSERT_OUTCOME: ${{ steps.assert.outcome }}
+        run: |
+          set -euo pipefail
+          configured=false
+          if [ "$CONFIGURED" = "true" ]; then configured=true; fi
+          # verified only when BOTH the smoke test and the release/digest/version assertions passed
+          verify=failure
+          if [ "$SMOKE_OUTCOME" = "success" ] && [ "$ASSERT_OUTCOME" = "success" ]; then verify=success; fi
+          if [ "$SMOKE_OUTCOME" = "skipped" ] && [ "$ASSERT_OUTCOME" = "skipped" ]; then verify=skipped; fi
+          python3 scripts/deploy/release_tools.py record --kind release --image "$IMAGE" --version "$VERSION" \
+            --git-sha "$GITHUB_SHA" --tags "sha-${GITHUB_SHA},${VERSION}" --base-url "$BASE_URL" \
+            --configured "$configured" --required "$DEPLOY_REQUIRED" \
+            --deploy-outcome "$DEPLOY_OUTCOME" --verify-outcome "$verify" \
+            --out reports/deployment-record.json
+          if [ "$configured" = "true" ] && [ "$DEPLOY_OUTCOME" = "success" ] && [ "$verify" = "success" ]; then
+            echo "deployed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload deployment record (kept 90 days)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deployment-record
+          path: |
+            reports/deployment-record.json
+            reports/deploy-result.json
+          if-no-files-found: warn
+          retention-days: 90

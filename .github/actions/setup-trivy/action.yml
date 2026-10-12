@@ -1,0 +1,20 @@
+name: Set up Trivy
+description: Install the pinned, checksum-verified Trivy CLI and cache its vulnerability database per day.
+runs:
+  using: composite
+  steps:
+    - name: Install trivy (pinned release, sha256 verified)
+      shell: bash
+      run: |
+        scripts/deploy/install_tool.sh trivy "$HOME/.local/bin"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+    - name: Cache key
+      id: day
+      shell: bash
+      run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+    - name: Cache the Trivy database
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/trivy
+        key: trivy-db-${{ steps.day.outputs.date }}
+        restore-keys: trivy-db-

@@ -1,0 +1,318 @@
+name: ci
+
+# Pull-request and main-branch quality gates. Every gate command lives in the Makefile and reads its
+# thresholds/flags from config/quality-policy.yaml (nothing is typed here). `quality-gate` is the ONLY
+# check that branch protection needs: it depends on every other job and passes only if each one is
+# exactly `success`. This workflow is also reusable (workflow_call) so release.yml re-runs the same gates
+# for the exact commit it publishes. No secrets are referenced anywhere in this file (fork-safe).
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# github.workflow is the CALLER's name when reused, so a standalone push run and the run embedded in
+# release.yml never share a group (they would cancel each other).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_FROZEN: "1" # uv run never re-locks: the lockfile in the commit is what is tested
+  PYTHONUNBUFFERED: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  config-validation:
+    name: config-validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Quality policy, mirrors, workflow permissions, drift scan
+        run: make policy-check
+      - name: uv.lock is in sync with pyproject.toml
+        run: make lock-check
+      - name: Install actionlint (pinned release, sha256 verified)
+        run: |
+          scripts/deploy/install_tool.sh actionlint "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Lint workflows
+        run: make workflow-lint
+      - name: Shell syntax of the deploy scripts
+        run: |
+          for f in scripts/deploy/*.sh; do bash -n "$f"; done
+
+  lint-format:
+    name: lint-format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: ruff check
+        run: make lint
+      - name: ruff format --check
+        run: make format-check
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: mypy (strict)
+        run: make typecheck
+
+  unit-tests:
+    name: unit-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: pytest (unit, demo-engine and deploy-helper tests)
+        run: make test-unit
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-unit-tests
+          path: reports/junit-unit.xml
+          if-no-files-found: warn
+          retention-days: 30
+
+  integration-tests:
+    name: integration-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: pytest (API, services, repositories, invariants, concurrency)
+        run: make test-integration
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-integration-tests
+          path: reports/junit-integration.xml
+          if-no-files-found: warn
+          retention-days: 30
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: pytest with branch coverage (fails under the policy threshold)
+        run: make test-coverage
+      - name: Job summary
+        if: always()
+        run: scripts/deploy/summarize.sh "Coverage" reports/pytest-coverage.txt 60
+      - name: Upload coverage and test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-coverage
+          path: |
+            reports/coverage.xml
+            reports/junit-coverage.xml
+            reports/pytest-coverage.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  bandit:
+    name: bandit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: bandit (severity and confidence from the policy)
+        run: make security-bandit
+      - name: Job summary
+        if: always()
+        run: scripts/deploy/summarize.sh "Bandit" reports/bandit.txt 30
+      - name: Upload bandit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-bandit
+          path: reports/bandit.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  dependency-audit:
+    name: dependency-audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: pip-audit over the exported lockfile (any known vulnerability fails)
+        run: make security-audit
+      - name: Job summary
+        if: always()
+        run: scripts/deploy/summarize.sh "pip-audit" reports/pip-audit.txt 30
+      - name: Upload pip-audit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-pip-audit
+          path: reports/pip-audit.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  trivy-fs-scan:
+    name: trivy-fs-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - uses: ./.github/actions/setup-trivy
+      - name: trivy filesystem scan (dependencies and secrets)
+        run: make security-trivy-fs
+      - name: trivy config scan (Dockerfile and IaC)
+        run: make security-trivy-config
+      - name: Job summary
+        if: always()
+        run: |
+          scripts/deploy/summarize.sh "Trivy filesystem scan" reports/trivy-fs.txt 25
+          scripts/deploy/summarize.sh "Trivy config scan" reports/trivy-config.txt 25
+      - name: Upload trivy reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-trivy-fs
+          path: |
+            reports/trivy-fs.txt
+            reports/trivy-config.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  docker-build:
+    name: docker-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GIT_SHA: ${{ github.sha }}
+      IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Build linux/amd64, run, smoke test, image guard, graceful stop (no push)
+        run: make docker-test
+      - name: Save the exact tested image for the scan job
+        run: make docker-save SAVE_PLATFORM_FLAG=
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### Docker image"
+            echo "- platform: linux/amd64, nothing was pushed"
+            echo "- git sha baked in: \`${GIT_SHA}\`"
+            docker image inspect stockflow:local --format '- size: {{.Size}} bytes, user: {{.Config.User}}' 2>/dev/null || echo "- image not available"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload image for the scan job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-tar
+          path: reports/image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  trivy-image-scan:
+    name: trivy-image-scan
+    needs: [docker-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - uses: ./.github/actions/setup-trivy
+      - name: Download the tested image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: image-tar
+          path: reports
+      - name: trivy image gate and full report (policy severities, unfixed handling from the policy)
+        run: make trivy-image-tar
+      - name: Job summary
+        if: always()
+        run: scripts/deploy/summarize.sh "Trivy image scan" reports/trivy-image.txt 25
+      - name: Upload trivy image reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-trivy-image
+          path: |
+            reports/trivy-image.txt
+            reports/trivy-image-full.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  quality-gate:
+    name: quality-gate
+    if: always()
+    needs:
+      - config-validation
+      - lint-format
+      - typecheck
+      - unit-tests
+      - integration-tests
+      - coverage
+      - bandit
+      - dependency-audit
+      - trivy-fs-scan
+      - docker-build
+      - trivy-image-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Every needed job must have succeeded (skipped, cancelled, failed and missing all fail)
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          REQUIRED_JOBS: config-validation,lint-format,typecheck,unit-tests,integration-tests,coverage,bandit,dependency-audit,trivy-fs-scan,docker-build,trivy-image-scan
+        run: python3 scripts/deploy/release_tools.py gate --required "$REQUIRED_JOBS"

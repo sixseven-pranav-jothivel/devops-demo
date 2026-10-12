@@ -1,0 +1,19 @@
+{#- Display helpers shared by the server-rendered partials. All output is autoescaped by Jinja2. -#}
+{% macro money(value) -%}
+{%- if value is string -%}${{ value }}{%- else -%}${{ '{:,.2f}'.format(value) }}{%- endif -%}
+{%- endmacro %}
+
+{% macro timestamp(value) -%}
+{%- if value is string -%}{{ value }}{%- else -%}{{ value.strftime('%Y-%m-%d %H:%M') }} UTC{%- endif -%}
+{%- endmacro %}
+
+{% macro iso(value) -%}
+{%- if value is string -%}{{ value }}{%- else -%}{{ value.strftime('%Y-%m-%dT%H:%M:%SZ') }}{%- endif -%}
+{%- endmacro %}
+
+{#- Stock state badge. Mirrors stockState() in static/js/app.js. -#}
+{% macro stock_badge(quantity, threshold) -%}
+{%- if quantity <= 0 -%}<span class="badge badge-danger">Out of stock</span>
+{%- elif quantity <= threshold -%}<span class="badge badge-warn">Low stock</span>
+{%- else -%}<span class="badge badge-ok">In stock</span>{%- endif -%}
+{%- endmacro %}

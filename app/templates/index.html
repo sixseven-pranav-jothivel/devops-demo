@@ -1,0 +1,282 @@
+{% extends "base.html" %}
+{% from "partials/_macros.html" import money %}
+{% block title %}StockFlow dashboard{% endblock %}
+
+{% block content %}
+{#- Config for app.js lives in data attributes (no inline scripts). tax_rate is an optional extra context key. -#}
+<div id="app"
+     data-low-threshold="{{ metrics.low_stock_threshold }}"
+     data-tax-rate="{{ tax_rate|default('0.08', true) }}">
+
+  <noscript>
+    <p class="notice notice-warn">JavaScript is disabled. You can browse the data below, but filtering, editing and placing orders need JavaScript.</p>
+  </noscript>
+
+  {# ---------------------------------------------------------------- metrics #}
+  <section class="section" aria-labelledby="metrics-h">
+    <h1 class="page-title" id="metrics-h">Dashboard</h1>
+    <ul class="cards" id="metrics" aria-label="Business metrics">
+      <li class="card">
+        <span class="card-label" id="m-revenue-l">Revenue</span>
+        <span class="card-value" id="m-revenue" aria-labelledby="m-revenue-l" data-metric="revenue_total">{{ money(metrics.revenue_total) }}</span>
+        <span class="card-sub">All confirmed orders</span>
+      </li>
+      <li class="card">
+        <span class="card-label" id="m-orders-l">Orders</span>
+        <span class="card-value" id="m-orders" aria-labelledby="m-orders-l" data-metric="order_count">{{ metrics.order_count }}</span>
+        <span class="card-sub">Confirmed</span>
+      </li>
+      <li class="card">
+        <span class="card-label" id="m-inv-l">Inventory value</span>
+        <span class="card-value" id="m-inventory" aria-labelledby="m-inv-l" data-metric="inventory_value">{{ money(metrics.inventory_value) }}</span>
+        <span class="card-sub"><span id="m-active">{{ metrics.active_product_count }}</span> active of <span id="m-products">{{ metrics.product_count }}</span> products</span>
+      </li>
+      <li class="card">
+        <span class="card-label" id="m-low-l">Low stock</span>
+        <span class="card-value" id="m-low" aria-labelledby="m-low-l" data-metric="low_stock_count">{{ metrics.low_stock_count }}</span>
+        <span class="card-sub"><span id="m-out">{{ metrics.out_of_stock_count }}</span> out of stock &middot; low is &le; <span id="m-threshold">{{ metrics.low_stock_threshold }}</span></span>
+      </li>
+    </ul>
+  </section>
+
+  {# ---------------------------------------------------------------- inventory #}
+  <section class="section" aria-labelledby="inventory-h">
+    <div class="section-head">
+      <h2 id="inventory-h">Inventory</h2>
+      <button type="button" class="btn btn-primary" id="new-product">New product</button>
+    </div>
+
+    <form class="filters" id="filters" role="search" aria-label="Filter products" autocomplete="off">
+      <div class="field">
+        <label for="f-q">Search</label>
+        <input type="search" id="f-q" name="q" placeholder="Name or SKU" maxlength="120">
+      </div>
+      <div class="field">
+        <label for="f-category">Category</label>
+        <select id="f-category" name="category">
+          <option value="">All categories</option>
+          {% for c in categories %}<option value="{{ c }}">{{ c }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="f-active">Status</label>
+        <select id="f-active" name="active">
+          <option value="">Active and inactive</option>
+          <option value="true">Active only</option>
+          <option value="false">Inactive only</option>
+        </select>
+      </div>
+      <div class="field field-check">
+        <input type="checkbox" id="f-low" name="low_stock">
+        <label for="f-low">Low or out of stock only</label>
+      </div>
+      <div class="field field-actions">
+        <button type="button" class="btn" id="clear-filters">Clear filters</button>
+      </div>
+    </form>
+
+    <p class="muted result-count" id="products-count" role="status" aria-live="polite">
+      Showing {{ products|length }} product{{ '' if products|length == 1 else 's' }}
+    </p>
+
+    <div class="table-wrap" id="products-region" aria-busy="false">
+      <table class="table" id="products-table">
+        <caption class="sr-only">Products with price, stock level and status</caption>
+        <thead>
+          <tr>
+            <th scope="col">SKU</th>
+            <th scope="col">Product</th>
+            <th scope="col">Category</th>
+            <th scope="col" class="num">Price</th>
+            <th scope="col" class="num">Stock</th>
+            <th scope="col">Status</th>
+            <th scope="col"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody id="products-body">
+          {% include "partials/_products_rows.html" %}
+        </tbody>
+      </table>
+      <div class="state" id="products-empty" {% if products %}hidden{% endif %}>
+        <p class="state-title">No products match.</p>
+        <p class="muted">Try a different search or clear the filters.</p>
+      </div>
+      <div class="state state-error" id="products-error" role="alert" hidden>
+        <p class="state-title">Could not load products.</p>
+        <p class="muted" id="products-error-msg"></p>
+        <button type="button" class="btn" id="products-retry">Retry</button>
+      </div>
+    </div>
+  </section>
+
+  {# ---------------------------------------------------------------- orders #}
+  <div class="two-col">
+    <section class="section" aria-labelledby="order-h">
+      <h2 id="order-h">New order</h2>
+      <form id="order-form" class="panel" novalidate>
+        <p class="muted" id="order-empty">No items yet. Add a line, or use &ldquo;Add to order&rdquo; in the inventory table.</p>
+        <ol class="lines" id="order-lines" aria-label="Order lines"></ol>
+        <button type="button" class="btn" id="add-line">Add line</button>
+
+        <dl class="totals" id="order-preview" aria-label="Order preview">
+          <div><dt>Subtotal</dt><dd id="pv-subtotal">$0.00</dd></div>
+          <div><dt id="pv-discount-l">Discount</dt><dd id="pv-discount">$0.00</dd></div>
+          <div><dt id="pv-tax-l">Tax</dt><dd id="pv-tax">$0.00</dd></div>
+          <div class="totals-grand"><dt>Total</dt><dd id="pv-total" aria-live="polite" aria-atomic="true">$0.00</dd></div>
+        </dl>
+        <p class="muted small">Preview only. The server calculates the final prices and checks stock when you place the order.</p>
+
+        <div class="notice notice-error" id="order-error" role="alert" hidden>
+          <p class="notice-title" id="order-error-msg"></p>
+          <ul class="detail-list" id="order-error-details"></ul>
+        </div>
+        <div class="notice notice-ok" id="order-success" role="status" hidden>
+          <span id="order-success-msg"></span>
+          <button type="button" class="btn btn-sm" id="order-success-view">View order</button>
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary" id="order-submit">Place order</button>
+          <button type="button" class="btn" id="order-clear">Clear</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="section" aria-labelledby="orders-h">
+      <div class="section-head">
+        <h2 id="orders-h">Recent orders</h2>
+        <button type="button" class="btn btn-sm" id="refresh-orders">Refresh</button>
+      </div>
+      <div class="table-wrap" id="orders-region" aria-busy="false">
+        <table class="table" id="orders-table"{% if not recent_orders %} hidden{% endif %}>
+          <caption class="sr-only">Most recent orders, newest first</caption>
+          <thead>
+            <tr>
+              <th scope="col">Order</th>
+              <th scope="col">Placed</th>
+              <th scope="col" class="num">Items</th>
+              <th scope="col" class="num">Total</th>
+              <th scope="col"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody id="orders-body">
+            {% include "partials/_orders_rows.html" %}
+          </tbody>
+        </table>
+        <div class="state" id="orders-empty" {% if recent_orders %}hidden{% endif %}>
+          <p class="state-title">No orders yet.</p>
+          <p class="muted">Build an order on the left to see it here.</p>
+        </div>
+        <div class="state state-error" id="orders-error" role="alert" hidden>
+          <p class="state-title">Could not load orders.</p>
+          <p class="muted" id="orders-error-msg"></p>
+          <button type="button" class="btn" id="orders-retry">Retry</button>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+{# ================================================================ dialogs #}
+<dialog id="product-dialog" aria-labelledby="product-dialog-title">
+  <form id="product-form" novalidate>
+    <h2 id="product-dialog-title">New product</h2>
+    <div class="notice notice-error" id="product-error" role="alert" hidden>
+      <p class="notice-title" id="product-error-msg"></p>
+      <ul class="detail-list" id="product-error-details"></ul>
+    </div>
+    <div class="form-grid">
+      <div class="field">
+        <label for="pf-sku">SKU</label>
+        <input id="pf-sku" name="sku" required maxlength="32" autocapitalize="characters" spellcheck="false" aria-describedby="pf-sku-h">
+        <span class="hint" id="pf-sku-h">Letters, digits, - and _ (2-32 characters). Saved in upper case.</span>
+      </div>
+      <div class="field">
+        <label for="pf-name">Name</label>
+        <input id="pf-name" name="name" required maxlength="120">
+      </div>
+      <div class="field">
+        <label for="pf-price">Price</label>
+        <input id="pf-price" name="price" required inputmode="decimal" autocomplete="off" aria-describedby="pf-price-h">
+        <span class="hint" id="pf-price-h">Up to 2 decimal places, e.g. 19.99</span>
+      </div>
+      <div class="field" id="pf-qty-field">
+        <label for="pf-qty">Opening stock</label>
+        <input id="pf-qty" name="quantity_in_stock" type="number" min="0" step="1" value="0" inputmode="numeric">
+      </div>
+      <div class="field">
+        <label for="pf-category">Category</label>
+        <input id="pf-category" name="category" list="category-options" maxlength="60" value="General">
+        <datalist id="category-options"></datalist>
+      </div>
+      <div class="field field-check">
+        <input type="checkbox" id="pf-active" name="active" checked>
+        <label for="pf-active">Active (can be ordered)</label>
+      </div>
+      <div class="field field-wide">
+        <label for="pf-description">Description</label>
+        <textarea id="pf-description" name="description" rows="3" maxlength="1000"></textarea>
+      </div>
+    </div>
+    <p class="muted small" id="pf-stock-note" hidden>Stock is changed with the Stock action, not here.</p>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary" id="product-submit">Save product</button>
+      <button type="button" class="btn" data-close>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="stock-dialog" aria-labelledby="stock-dialog-title">
+  <form id="stock-form" novalidate>
+    <h2 id="stock-dialog-title">Adjust stock</h2>
+    <p id="stock-product" class="strong"></p>
+    <p class="muted" id="stock-current"></p>
+    <div class="notice notice-error" id="stock-error" role="alert" hidden>
+      <p class="notice-title" id="stock-error-msg"></p>
+      <ul class="detail-list" id="stock-error-details"></ul>
+    </div>
+    <div class="form-grid">
+      <div class="field">
+        <label for="sf-delta">Change (use a negative number to remove)</label>
+        <input id="sf-delta" name="delta" type="number" step="1" min="-1000000" max="1000000" required inputmode="numeric" aria-describedby="sf-result">
+      </div>
+      <div class="field">
+        <label for="sf-reason">Reason (optional)</label>
+        <input id="sf-reason" name="reason" maxlength="200">
+      </div>
+    </div>
+    <p class="muted" id="sf-result" aria-live="polite"></p>
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary" id="stock-submit">Apply change</button>
+      <button type="button" class="btn" data-close>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="order-dialog" aria-labelledby="order-dialog-title">
+  <div id="order-dialog-inner">
+    <h2 id="order-dialog-title">Order</h2>
+    <div class="notice notice-error" id="od-error" role="alert" hidden></div>
+    <p class="muted" id="od-meta"></p>
+    <div class="table-wrap">
+      <table class="table" id="od-table">
+        <caption class="sr-only">Order line items</caption>
+        <thead>
+          <tr>
+            <th scope="col">SKU</th>
+            <th scope="col">Product</th>
+            <th scope="col" class="num">Qty</th>
+            <th scope="col" class="num">Unit price</th>
+            <th scope="col" class="num">Line total</th>
+          </tr>
+        </thead>
+        <tbody id="od-body"></tbody>
+      </table>
+    </div>
+    <dl class="totals" id="od-totals" aria-label="Order totals"></dl>
+    <div class="form-actions">
+      <button type="button" class="btn btn-primary" data-close>Close</button>
+    </div>
+  </div>
+</dialog>
+{% endblock %}

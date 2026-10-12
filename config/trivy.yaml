@@ -1,0 +1,8 @@
+# Trivy configuration for StockFlow (owner: security). Used with `--config config/trivy.yaml`.
+#
+# Gate semantics (severities, exit code, ignore-unfixed, scanners, skip dirs, ignore file) are NOT set
+# here: they come from config/quality-policy.yaml via `python scripts/quality_policy.py args trivy-*`
+# so there is exactly one place to read them. `scripts/quality_policy.py check` fails if this file
+# defines any of those gate keys. Only non-gating operational options belong here.
+db:
+  skip-java-db-update: true   # no Java artifacts in this project; avoids a ~1 GB download

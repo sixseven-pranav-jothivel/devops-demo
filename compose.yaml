@@ -1,0 +1,30 @@
+# Local run of the production image: `make compose-up` (or `docker compose up --build`).
+# Data is in-memory and resets on restart, exactly like production.
+name: stockflow
+
+services:
+  stockflow:
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-0.0.0-dev}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-}
+    # Distinct from the amd64 `make docker-build` tag: compose builds for the host platform.
+    image: stockflow-compose:local
+    # Publishes on localhost only; change HOST_PORT to avoid a clash.
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8000}:8000"
+    environment:
+      DEPLOY_ENVIRONMENT: local
+      REPOSITORY_BACKEND: memory
+      PORT: "8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 15s

@@ -1,0 +1,270 @@
+"""Legacy catalogue importer (DEMO-DEFECT:bad_coverage).
+
+A large, never-called, untested module: it adds hundreds of uncovered statements to ``app/`` so the
+coverage gate (``coverage.fail_under`` in config/quality-policy.yaml) fails while ruff, mypy, bandit
+and every existing test keep passing. Stdlib only; nothing imports it.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+
+CENT = Decimal("0.01")
+REQUIRED_COLUMNS = ("sku", "name", "category", "price", "quantity")
+CATEGORY_ALIASES = {
+    "acc": "accessories",
+    "accessory": "accessories",
+    "cable": "cables",
+    "cbl": "cables",
+    "peripheral": "peripherals",
+    "periph": "peripherals",
+    "stor": "storage",
+    "disk": "storage",
+}
+MAX_NAME_LENGTH = 120
+MAX_SKU_LENGTH = 32
+
+
+@dataclass
+class LegacyRow:
+    """One normalised catalogue row."""
+
+    sku: str
+    name: str
+    category: str
+    price: Decimal
+    quantity: int
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ImportReport:
+    """Outcome of an import run."""
+
+    rows: list[LegacyRow] = field(default_factory=list)
+    errors: dict[int, list[str]] = field(default_factory=dict)
+    skipped: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return not self.errors
+
+    def add_error(self, line: int, message: str) -> None:
+        self.errors.setdefault(line, []).append(message)
+
+    def summary(self) -> str:
+        if self.ok:
+            return f"imported {len(self.rows)} rows, skipped {self.skipped}"
+        bad = len(self.errors)
+        return f"imported {len(self.rows)} rows, {bad} rows rejected, skipped {self.skipped}"
+
+
+def normalise_sku(raw: str) -> str:
+    cleaned = "".join(ch for ch in raw.strip().upper() if ch.isalnum() or ch == "-")
+    if len(cleaned) > MAX_SKU_LENGTH:
+        cleaned = cleaned[:MAX_SKU_LENGTH]
+    return cleaned
+
+
+def normalise_name(raw: str) -> str:
+    collapsed = " ".join(raw.split())
+    if len(collapsed) > MAX_NAME_LENGTH:
+        collapsed = collapsed[: MAX_NAME_LENGTH - 1].rstrip() + "."
+    return collapsed
+
+
+def normalise_category(raw: str) -> str:
+    key = raw.strip().lower()
+    if not key:
+        return "uncategorised"
+    return CATEGORY_ALIASES.get(key, key)
+
+
+def parse_price(raw: str) -> Decimal:
+    text = raw.strip().replace("$", "").replace(",", "")
+    if not text:
+        raise ValueError("price is empty")
+    try:
+        value = Decimal(text)
+    except InvalidOperation as exc:
+        raise ValueError(f"price '{raw}' is not a number") from exc
+    if value < 0:
+        raise ValueError("price must not be negative")
+    return value.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def parse_quantity(raw: str) -> int:
+    text = raw.strip()
+    if not text:
+        raise ValueError("quantity is empty")
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise ValueError(f"quantity '{raw}' is not an integer") from exc
+    if value < 0:
+        raise ValueError("quantity must not be negative")
+    return value
+
+
+def check_header(fieldnames: Sequence[str] | None) -> list[str]:
+    if not fieldnames:
+        return ["header row is missing"]
+    present = {name.strip().lower() for name in fieldnames}
+    return [f"missing column '{col}'" for col in REQUIRED_COLUMNS if col not in present]
+
+
+def convert_row(record: dict[str, str]) -> LegacyRow:
+    lowered = {key.strip().lower(): (value or "") for key, value in record.items() if key}
+    sku = normalise_sku(lowered.get("sku", ""))
+    if not sku:
+        raise ValueError("sku is empty")
+    name = normalise_name(lowered.get("name", ""))
+    if not name:
+        raise ValueError("name is empty")
+    row = LegacyRow(
+        sku=sku,
+        name=name,
+        category=normalise_category(lowered.get("category", "")),
+        price=parse_price(lowered.get("price", "")),
+        quantity=parse_quantity(lowered.get("quantity", "")),
+    )
+    if row.quantity == 0:
+        row.notes.append("out of stock on import")
+    if row.price == 0:
+        row.notes.append("zero price: check source")
+    return row
+
+
+def import_csv(text: str) -> ImportReport:
+    report = ImportReport()
+    reader = csv.DictReader(io.StringIO(text))
+    problems = check_header(reader.fieldnames)
+    if problems:
+        for problem in problems:
+            report.add_error(1, problem)
+        return report
+    seen: set[str] = set()
+    for line, record in enumerate(reader, start=2):
+        if not any((value or "").strip() for value in record.values()):
+            report.skipped += 1
+            continue
+        try:
+            row = convert_row(record)
+        except ValueError as exc:
+            report.add_error(line, str(exc))
+            continue
+        if row.sku in seen:
+            report.add_error(line, f"duplicate sku '{row.sku}'")
+            continue
+        seen.add(row.sku)
+        report.rows.append(row)
+    return report
+
+
+def group_by_category(rows: list[LegacyRow]) -> dict[str, list[LegacyRow]]:
+    groups: dict[str, list[LegacyRow]] = {}
+    for row in rows:
+        groups.setdefault(row.category, []).append(row)
+    for members in groups.values():
+        members.sort(key=lambda item: item.sku)
+    return dict(sorted(groups.items()))
+
+
+def stock_value(rows: list[LegacyRow]) -> Decimal:
+    total = Decimal("0.00")
+    for row in rows:
+        total += row.price * row.quantity
+    return total.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def low_stock(rows: list[LegacyRow], threshold: int) -> list[LegacyRow]:
+    return [row for row in rows if 0 < row.quantity <= threshold]
+
+
+def out_of_stock(rows: list[LegacyRow]) -> list[LegacyRow]:
+    return [row for row in rows if row.quantity == 0]
+
+
+def price_bands(rows: list[LegacyRow]) -> dict[str, int]:
+    bands = {"budget": 0, "standard": 0, "premium": 0}
+    for row in rows:
+        if row.price < Decimal("25.00"):
+            bands["budget"] += 1
+        elif row.price < Decimal("100.00"):
+            bands["standard"] += 1
+        else:
+            bands["premium"] += 1
+    return bands
+
+
+def render_markdown(rows: list[LegacyRow]) -> str:
+    lines = ["| SKU | Name | Category | Price | Qty |", "|---|---|---|---|---|"]
+    for row in rows:
+        lines.append(f"| {row.sku} | {row.name} | {row.category} | {row.price} | {row.quantity} |")
+    return "\n".join(lines) + "\n"
+
+
+def render_csv(rows: list[LegacyRow]) -> str:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(REQUIRED_COLUMNS)
+    for row in rows:
+        writer.writerow([row.sku, row.name, row.category, str(row.price), row.quantity])
+    return buffer.getvalue()
+
+
+def diff_catalogues(old: list[LegacyRow], new: list[LegacyRow]) -> dict[str, list[str]]:
+    old_map = {row.sku: row for row in old}
+    new_map = {row.sku: row for row in new}
+    added = sorted(set(new_map) - set(old_map))
+    removed = sorted(set(old_map) - set(new_map))
+    changed: list[str] = []
+    for sku in sorted(set(old_map) & set(new_map)):
+        before, after = old_map[sku], new_map[sku]
+        if (before.price, before.quantity, before.name) != (
+            after.price,
+            after.quantity,
+            after.name,
+        ):
+            changed.append(sku)
+    return {"added": added, "removed": removed, "changed": changed}
+
+
+def merge_catalogues(base: list[LegacyRow], update: list[LegacyRow]) -> list[LegacyRow]:
+    merged = {row.sku: row for row in base}
+    for row in update:
+        existing = merged.get(row.sku)
+        if existing is None:
+            merged[row.sku] = row
+            continue
+        existing.name = row.name
+        existing.category = row.category
+        existing.price = row.price
+        existing.quantity += row.quantity
+        existing.notes.extend(row.notes)
+    return [merged[sku] for sku in sorted(merged)]
+
+
+def apply_markdown(rows: list[LegacyRow], percent: Decimal) -> list[LegacyRow]:
+    if percent < 0 or percent > 90:
+        raise ValueError("percent must be between 0 and 90")
+    factor = (Decimal("100") - percent) / Decimal("100")
+    result: list[LegacyRow] = []
+    for row in rows:
+        discounted = (row.price * factor).quantize(CENT, rounding=ROUND_HALF_UP)
+        result.append(
+            LegacyRow(row.sku, row.name, row.category, discounted, row.quantity, list(row.notes))
+        )
+    return result
+
+
+def reorder_plan(rows: list[LegacyRow], target: int) -> dict[str, int]:
+    plan: dict[str, int] = {}
+    for row in rows:
+        if row.quantity < target:
+            plan[row.sku] = target - row.quantity
+    return plan

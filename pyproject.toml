@@ -1,0 +1,103 @@
+[project]
+name = "stockflow"
+version = "0.1.0"
+description = "StockFlow: small FastAPI inventory/order app used to demonstrate a complete CI/CD and DevOps lifecycle."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.143",
+    "uvicorn>=0.54",
+    "jinja2>=3.1",
+    "pydantic>=2.14",
+    "pydantic-settings>=2.15",
+    "sqlalchemy>=2.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1",
+    "pytest-cov>=7.1",
+    "httpx>=0.28",
+    "ruff>=0.16",
+    "mypy>=2.4",
+    "bandit>=1.9",
+    "pip-audit>=2.10",
+    "types-PyYAML>=6.0",
+    "pyyaml>=6.0",
+]
+
+[tool.uv]
+# StockFlow is an application, not an installable library: uv installs dependencies only.
+package = false
+default-groups = ["dev"]
+
+# ---------------------------------------------------------------- ruff (architect)
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["."]
+extend-exclude = [".demo-state", "reports"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "PT", "RUF", "N", "PL"]
+ignore = [
+    "PLR0913",  # API/service functions legitimately take several keyword arguments
+    "PLR2004",  # magic values are fine in tests and small domain constants
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "demo"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR0915"]
+
+[tool.ruff.format]
+quote-style = "double"
+# Ruff 0.16 also formats Python code blocks inside Markdown; docs hold contract pseudo-code, so skip them.
+exclude = ["*.md"]
+
+# ---------------------------------------------------------------- mypy (architect)
+[tool.mypy]
+python_version = "3.12"
+files = ["app", "demo"]
+strict = true
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+show_error_codes = true
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# ---------------------------------------------------------------- pytest / coverage (QA owns these two sections)
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers --strict-config --import-mode=importlib"
+markers = [
+    "unit: pure logic, no I/O (pricing, inventory, schemas, config)",
+    "integration: exercises several layers together (still hermetic, loopback only)",
+    "concurrency: multi-threaded invariant tests (deterministic, no sleeps)",
+    "demo: tests of the defect-injection engine",
+]
+filterwarnings = [
+    "error",
+    # Starlette 1.x warns at import time that TestClient prefers httpx2; httpx is the pinned dependency.
+    "ignore:Using .httpx. with .starlette.testclient. is deprecated:Warning",
+]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = false
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]

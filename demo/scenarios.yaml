@@ -1,0 +1,603 @@
+# StockFlow defect scenarios (owner: demo-engineer). Engine: demo/engine.py, CLI: `python -m demo`.
+#
+# A scenario is a list of reversible patch operations on real files, detected by a REAL tool.
+# Every inserted hunk carries the marker `DEMO-DEFECT:<id>`; the clean tree has none (guard test
+# tests/demo/test_baseline_clean.py). Ops: replace_text (old must occur exactly once), replace_regex
+# (pattern must match exactly once), create_file / replace_file (inline `content`, or `source` below
+# demo/fixtures/<id>/ with an optional sha256 pin).
+#
+# Nothing here weakens scanning: no ignore files, thresholds or policy are touched by any scenario.
+version: 1
+
+demo:
+  # Runtime-failure scenarios (category: runtime) refuse to inject unless this is true or
+  # `--allow-runtime-failures` is passed. Independently, the injected code is INERT unless the process
+  # environment has BOTH STOCKFLOW_DEMO_FAULT=<scenario id> and STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES=true.
+  # It never reads request headers, query params, cookies or bodies.
+  allow_runtime_failures: false
+
+# Real gate commands (run from the repo root). Thresholds come from config/quality-policy.yaml through
+# scripts/quality_policy.py, never from this file. `demo/verify.py` and `make demo-verify*` use these.
+gates:
+  ruff: "uv run ruff check ."
+  format: "uv run ruff format --check ."
+  mypy: "uv run mypy"
+  pytest: "uv run pytest -q"
+  unit-tests: "uv run pytest -q tests/unit"
+  coverage: "uv run pytest -q --cov --cov-report=term-missing"
+  bandit: "uv run bandit $(uv run python scripts/quality_policy.py args bandit)"
+  pip-audit: >-
+    uv export --frozen --no-hashes --no-emit-project --all-groups -o reports/requirements-audit.txt
+    && uv run pip-audit $(uv run python scripts/quality_policy.py args pip-audit)
+  trivy-fs: "trivy fs $(uv run python scripts/quality_policy.py args trivy-fs) ."
+
+# Fixture checks run by `python demo/inject.py --validate-fixtures` (real tools, real advisory DBs).
+fixture_checks:
+  - kind: pip-audit
+    scenario: bad_dependency
+    requirements: demo/fixtures/bad_dependency/vulnerable-pin.txt
+    expect_ids: [CVE-2024-24762]
+  - kind: trivy-fs
+    scenario: bad_dependency
+    requirements: demo/fixtures/bad_dependency/vulnerable-pin.txt
+    expect_ids: [CVE-2024-24762]
+  - kind: lock-consistency
+    scenario: bad_dependency
+  - kind: trivy-image-ref
+    scenario: bad_container
+    image: "python:3.12.0-slim-bookworm@sha256:19a6235339a74eca01227b03629f63b6f5020abc21142436eced6ec3a9839a76"
+    min_findings: 1
+
+scenarios:
+  # ------------------------------------------------------------------------------------------------
+  - id: clean
+    name: "Clean baseline"
+    category: baseline
+    description: >-
+      No defect. Selecting it restores the exact baseline (same as `demo-reset`). Every gate passes and
+      deployment is allowed.
+    files: []
+    patch: []
+    expected:
+      stage: pr-ci
+      gate: all
+      command: "make quality"
+      exit: zero
+      gates: [ruff, format, mypy, coverage, bandit, pip-audit, trivy-fs]
+      output_contains: []
+    reproduce:
+      - "python -m demo reset"
+      - "make quality"
+    remediation: "Nothing to fix."
+    deployment_allowed: true
+    requires: [network]
+
+  # ------------------------------------------------------------------------------------------------
+  - id: bad_lint
+    name: "Unused import (lint failure)"
+    category: lint
+    description: "orders.py imports `os` and never uses it. Ruff F401 fails the lint gate; nothing else breaks."
+    files: [app/services/orders.py]
+    patch:
+      - op: replace_text
+        file: app/services/orders.py
+        old: |-
+          from __future__ import annotations
+
+          from decimal import Decimal
+        new: |-
+          from __future__ import annotations
+
+          import os  # DEMO-DEFECT:bad_lint
+          from decimal import Decimal
+    expected:
+      stage: pr-ci
+      gate: ruff
+      command: "uv run ruff check ."
+      exit: nonzero
+      output_contains: ["F401", "`os` imported but unused", "app/services/orders.py"]
+    reproduce:
+      - "make demo SCENARIO=bad_lint"
+      - "uv run ruff check ."
+    remediation: "Delete the unused `import os` (or `uv run ruff check --fix .`)."
+    deployment_allowed: false
+    must_still_pass: [format, mypy, pytest, bandit]
+    restore_note: "demo-reset restores app/services/orders.py"
+
+  # ------------------------------------------------------------------------------------------------
+  - id: bad_format
+    name: "Badly formatted code (format failure)"
+    category: format
+    description: >-
+      pricing.py has a statement written with single quotes and padding spaces. `ruff check` passes (it is
+      valid, lint-clean code) but `ruff format --check` fails.
+    files: [app/services/pricing.py]
+    patch:
+      - op: replace_text
+        file: app/services/pricing.py
+        old: 'CENT: Decimal = Decimal("0.01")'
+        new: "CENT: Decimal = Decimal(  '0.01'  )  # DEMO-DEFECT:bad_format"
+    expected:
+      stage: pr-ci
+      gate: ruff-format
+      command: "uv run ruff format --check ."
+      exit: nonzero
+      output_contains: ["File would be reformatted", "app/services/pricing.py"]
+    reproduce:
+      - "make demo SCENARIO=bad_format"
+      - "uv run ruff format --check ."
+    remediation: "Run `uv run ruff format .` and commit the result."
+    deployment_allowed: false
+    must_still_pass: [ruff, mypy, pytest, bandit]
+    restore_note: "demo-reset restores app/services/pricing.py"
+
+  # ------------------------------------------------------------------------------------------------
+  - id: bad_typecheck
+    name: "Wrong return annotation (mypy failure)"
+    category: types
+    description: >-
+      `get_product` is annotated to return `str` but returns a `Product`. Runtime behaviour and tests are
+      unchanged; only the strict mypy gate fails (in products.py and in the router that calls it).
+    files: [app/services/products.py]
+    patch:
+      - op: replace_text
+        file: app/services/products.py
+        old: "def get_product(repo: Repository, product_id: int) -> Product:"
+        new: "def get_product(repo: Repository, product_id: int) -> str:  # DEMO-DEFECT:bad_typecheck"
+    expected:
+      stage: pr-ci
+      gate: mypy
+      command: "uv run mypy"
+      exit: nonzero
+      output_contains: ["app/services/products.py", "[return-value]", "Incompatible return value type"]
+    reproduce:
+      - "make demo SCENARIO=bad_typecheck"
+      - "uv run mypy"
+    remediation: "Restore the `-> Product` return annotation."
+    deployment_allowed: false
+    must_still_pass: [ruff, format, pytest, bandit]
+    restore_note: "demo-reset restores app/services/products.py"
+
+  # ------------------------------------------------------------------------------------------------
+  - id: bad_unit_test
+    name: "Order total ignores the discount (unit test failure)"
+    category: logic
+    description: >-
+      `calculate_total` returns `subtotal + tax` instead of `subtotal - discount + tax`. Types, lint and
+      format are fine; the pricing unit tests fail.
+    files: [app/services/pricing.py]
+    patch:
+      - op: replace_text
+        file: app/services/pricing.py
+        old: "    return subtotal - discount + tax"
+        new: "    return subtotal + tax  # DEMO-DEFECT:bad_unit_test"
+    expected:
+      stage: pr-ci
+      gate: pytest
+      command: "uv run pytest -q tests/unit"
+      exit: nonzero
+      output_contains: ["FAILED", "tests/unit/test_pricing.py", "calculate_total"]
+    reproduce:
+      - "make demo SCENARIO=bad_unit_test"
+      - "uv run pytest -q tests/unit"
+    remediation: "Restore `return subtotal - discount + tax` in calculate_total."
+    deployment_allowed: false
+    must_still_pass: [ruff, format, mypy, bandit]
+    restore_note: "demo-reset restores app/services/pricing.py"
+
+  # ------------------------------------------------------------------------------------------------
+  - id: bad_integration_test
+    name: "Orders never decrement stock (integration test failure)"
+    category: logic
+    description: >-
+      `place_order` decrements every product's stock by 0 instead of the ordered quantity. Pure unit tests
+      (pricing, validation, schemas) still pass; only tests that place orders through the service/API and
+      look at stock fail.
+    files: [app/services/orders.py]
+    patch:
+      - op: replace_text
+        file: app/services/orders.py
+        old: "            uow.decrement_stock(item.product_id, item.quantity)"
+        new: "            uow.decrement_stock(item.product_id, 0)  # DEMO-DEFECT:bad_integration_test"
+    expected:
+      stage: pr-ci
+      gate: pytest
+      command: "uv run pytest -q tests/services tests/api"
+      exit: nonzero
+      output_contains: ["FAILED"]
+    reproduce:
+      - "make demo SCENARIO=bad_integration_test"
+      - "uv run pytest -q tests/services tests/api   # fails"
+      - "uv run pytest -q tests/unit                 # still passes"
+    remediation: "Restore `uow.decrement_stock(item.product_id, item.quantity)` in place_order."
+    deployment_allowed: false
+    must_still_pass: [ruff, format, mypy, bandit, unit-tests]
+    restore_note: "demo-reset restores app/services/orders.py"
+
+  # ------------------------------------------------------------------------------------------------
+  - id: bad_coverage
+    name: "Large untested module (coverage gate failure)"
+    category: coverage
+    description: >-
+      Adds app/services/legacy_import.py, ~200 untested statements that nothing imports. Every test still
+      passes and lint/types/security are clean, but total branch coverage falls below
+      coverage.fail_under (config/quality-policy.yaml).
+    files: [app/services/legacy_import.py]
+    patch:
+      - op: create_file
+        file: app/services/legacy_import.py
+        source: legacy_import.py.txt
+        sha256: d361d122ae360f0bc34c76bd26dbeb111cdc5de9f8e394fb9029c7926834c5fa
+    expected:
+      stage: pr-ci
+      gate: coverage
+      command: "uv run pytest -q --cov --cov-report=term-missing"
+      exit: nonzero
+      output_contains: ["app/services/legacy_import.py", "Required test coverage of", "not reached"]
+    reproduce:
+      - "make demo SCENARIO=bad_coverage"
+      - "uv run pytest -q --cov --cov-report=term-missing"
+    remediation: "Delete app/services/legacy_import.py, or cover it with tests (never lower fail_under)."
+    deployment_allowed: false
+    must_still_pass: [ruff, format, mypy, bandit, pytest]
+    restore_note: "demo-reset deletes app/services/legacy_import.py"
+
+  # ------------------------------------------------------------------------------------------------
+  - id: bad_security
+    name: "Shell injection in app code (Bandit failure)"
+    category: security
+    description: >-
+      metrics.py gains a helper that runs `git rev-parse` through a shell built from an f-string
+      (Bandit B602, HIGH severity / HIGH confidence). The code is lint-, format- and type-clean.
+    files: [app/services/metrics.py]
+    patch:
+      - op: replace_text
+        file: app/services/metrics.py
+        old: |-
+          from __future__ import annotations
+
+          from decimal import Decimal
+        new: |-
+          from __future__ import annotations
+
+          import subprocess  # DEMO-DEFECT:bad_security
+          from decimal import Decimal
+      - op: replace_text
+        file: app/services/metrics.py
+        old: "        low_stock_threshold=low_stock_threshold,\n    )\n"
+        new: "        low_stock_threshold=low_stock_threshold,\n    )\n\n\ndef revision_label(ref: str) -> str:  # DEMO-DEFECT:bad_security\n    \"\"\"Resolve a git ref to a short revision label (shell built from caller input).\"\"\"\n    return subprocess.check_output(f\"git rev-parse --short {ref}\", shell=True, text=True).strip()\n"
+    expected:
+      stage: pr-ci
+      gate: bandit
+      command: "uv run bandit $(uv run python scripts/quality_policy.py args bandit)"
+      exit: nonzero
+      output_contains: ["B602", "shell=True", "app/services/metrics.py"]
+    reproduce:
+      - "make demo SCENARIO=bad_security"
+      - "uv run bandit $(uv run python scripts/quality_policy.py args bandit)"
+    remediation: >-
+      Delete the helper, or call `subprocess.run(["git", "rev-parse", "--short", ref], check=True)` with
+      an argument list and no shell, validating `ref` first.
+    deployment_allowed: false
+    must_still_pass: [ruff, format, mypy]
+    restore_note: "demo-reset restores app/services/metrics.py"
+
+  # ------------------------------------------------------------------------------------------------
+  - id: bad_dependency
+    name: "Known-vulnerable runtime dependency (pip-audit + Trivy failure)"
+    category: dependency
+    description: >-
+      Adds `python-multipart==0.0.6` to pyproject.toml and a consistent uv.lock entry. That release has
+      CVE-2024-24762 / GHSA-2jv5-9r88-3w3p (HIGH, ReDoS, fixed in 0.0.7) and later advisories. Both
+      `pip-audit` (on the exported lock) and `trivy fs` report it, so the normal CI security job fails
+      with no CI change. It is a direct runtime dependency, so it would also enter the image.
+      The pin is verified against the live advisory DBs by `python demo/inject.py --validate-fixtures`.
+    files: [pyproject.toml, uv.lock]
+    patch:
+      - op: replace_text
+        file: pyproject.toml
+        old: |2-
+              "sqlalchemy>=2.1",
+          ]
+        new: |2-
+              "sqlalchemy>=2.1",
+              "python-multipart==0.0.6",  # DEMO-DEFECT:bad_dependency
+          ]
+      - op: replace_text
+        file: uv.lock
+        old: |-
+          [[package]]
+          name = "pyyaml"
+        new: |-
+          # DEMO-DEFECT:bad_dependency
+          [[package]]
+          name = "python-multipart"
+          version = "0.0.6"
+          source = { registry = "https://pypi.org/simple" }
+          sdist = { url = "https://files.pythonhosted.org/packages/2d/23/abcfad10c3348cb6358400f8adbc21b523bbc6c954494fd0974428068672/python_multipart-0.0.6.tar.gz", hash = "sha256:e9925a80bb668529f1b67c7fdb0a5dacdd7cbfc6fb0bff3ea443fe22bdd62132", size = 31024, upload-time = "2023-02-27T16:40:10.091Z" }
+          wheels = [
+              { url = "https://files.pythonhosted.org/packages/b4/ff/b1e11d8bffb5e0e1b6d27f402eeedbeb9be6df2cdbc09356a1ae49806dbf/python_multipart-0.0.6-py3-none-any.whl", hash = "sha256:ee698bab5ef148b0a760751c261902cd096e57e10558e11aca17646b74ee1c18", size = 45711, upload-time = "2023-02-27T16:40:14.113Z" },
+          ]
+
+          [[package]]
+          name = "pyyaml"
+      - op: replace_text
+        file: uv.lock
+        old: |2-
+              { name = "pydantic-settings" },
+              { name = "sqlalchemy" },
+              { name = "uvicorn" },
+          ]
+
+          [package.dev-dependencies]
+        new: |2-
+              { name = "pydantic-settings" },
+              { name = "python-multipart" },  # DEMO-DEFECT:bad_dependency
+              { name = "sqlalchemy" },
+              { name = "uvicorn" },
+          ]
+
+          [package.dev-dependencies]
+      - op: replace_text
+        file: uv.lock
+        old: |2-
+              { name = "pydantic-settings", specifier = ">=2.15" },
+              { name = "sqlalchemy", specifier = ">=2.1" },
+        new: |2-
+              { name = "pydantic-settings", specifier = ">=2.15" },
+              { name = "python-multipart", specifier = "==0.0.6" },  # DEMO-DEFECT:bad_dependency
+              { name = "sqlalchemy", specifier = ">=2.1" },
+    expected:
+      stage: pr-ci
+      gate: pip-audit
+      command: >-
+        uv export --frozen --no-hashes --no-emit-project --all-groups -o reports/requirements-audit.txt
+        && uv run pip-audit $(uv run python scripts/quality_policy.py args pip-audit)
+      exit: nonzero
+      output_contains: ["python-multipart", "0.0.6", "0.0.7"]
+      also:
+        - gate: trivy-fs
+          command: "trivy fs $(uv run python scripts/quality_policy.py args trivy-fs) ."
+          output_contains: ["python-multipart", "CVE-2024-24762", "HIGH"]
+    reproduce:
+      - "make demo SCENARIO=bad_dependency"
+      - "make security      # pip-audit and trivy fs both fail"
+      - "uv lock --check    # still consistent: the lock was patched, not hand-broken"
+    remediation: >-
+      Remove the pin (or raise it to the current python-multipart release), run `uv lock`, commit
+      pyproject.toml and uv.lock. Never add an ignore without id, reason and expiry.
+    deployment_allowed: false
+    requires: [network]
+    must_still_pass: [ruff, format, mypy, bandit, pytest]
+    restore_note: "demo-reset restores pyproject.toml and uv.lock byte for byte"
+
+  # ------------------------------------------------------------------------------------------------
+  - id: bad_container
+    name: "Outdated base image with fixable HIGH/CRITICAL CVEs (Trivy image failure)"
+    category: container
+    description: >-
+      Repoints the Dockerfile's base stage (`FROM python:... AS base`, the one line devops reserved for
+      this scenario) at python:3.12.0-slim-bookworm, digest pinned: a 2023 Debian image whose OS packages
+      carry dozens of HIGH/CRITICAL findings that already have fixes. The image still builds; the Trivy
+      image gate (ignore_unfixed: true, so only fixable findings block) fails.
+      DOCKERFILE CONTRACT: exactly one line matching `^FROM python:\S+ AS base$`; the clean Dockerfile is
+      never modified except through this patch.
+    files: [Dockerfile]
+    patch:
+      - op: replace_regex
+        file: Dockerfile
+        pattern: '^FROM python:\S+ AS base$'
+        new: |-
+          # DEMO-DEFECT:bad_container
+          FROM python:3.12.0-slim-bookworm@sha256:19a6235339a74eca01227b03629f63b6f5020abc21142436eced6ec3a9839a76 AS base
+    expected:
+      stage: image-build
+      gate: trivy-image
+      command: >-
+        {docker} build --platform linux/amd64 -t stockflow:demo-verify . &&
+        {docker} save stockflow:demo-verify > .demo-state/demo-verify-image.tar &&
+        trivy image $(uv run python scripts/quality_policy.py args trivy-image) --input .demo-state/demo-verify-image.tar
+      exit: nonzero
+      output_contains: ["HIGH", "CRITICAL", "fixed"]
+      cleanup:
+        - "{docker} rmi -f stockflow:demo-verify"
+        - "rm -f .demo-state/demo-verify-image.tar; rmdir .demo-state 2>/dev/null; true"
+    reproduce:
+      - "make demo SCENARIO=bad_container"
+      - "make docker-build"
+      - "make docker-scan"
+    remediation: "Restore the pinned current base image (`make demo-reset`) and rebuild."
+    deployment_allowed: false
+    requires: [docker, trivy, network, dockerfile]
+    restore_note: "demo-reset restores the Dockerfile"
+
+  # ------------------------------------------------------------------------------------------------
+  - id: slow_api
+    name: "Slow product listing (k6 latency threshold failure)"
+    category: runtime
+    description: >-
+      GET /api/products sleeps 750 ms, but only when the process env has STOCKFLOW_DEMO_FAULT=slow_api AND
+      STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES=true. All PR gates pass; the load test (p95 < policy
+      load_test.p95_ms) fails. Merging the patch alone changes nothing in production.
+    files: [app/api/products.py]
+    patch:
+      - op: replace_text
+        file: app/api/products.py
+        old: |-
+          from typing import Annotated
+
+          from fastapi import APIRouter, Query, Response
+        new: |-
+          import os  # DEMO-DEFECT:slow_api
+          import time  # DEMO-DEFECT:slow_api
+          from typing import Annotated
+
+          from fastapi import APIRouter, Query, Response
+      - op: replace_text
+        file: app/api/products.py
+        old: |-
+          router = APIRouter(prefix="/api/products", tags=["products"])
+        new: |-
+          router = APIRouter(prefix="/api/products", tags=["products"])
+
+
+          def _demo_fault_active() -> bool:  # DEMO-DEFECT:slow_api
+              """Two-key runtime gate, read from the process environment only."""
+              env = os.environ
+              return (
+                  env.get("STOCKFLOW_DEMO_FAULT") == "slow_api"
+                  and env.get("STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES") == "true"
+              )
+      - op: replace_text
+        file: app/api/products.py
+        old: |-
+          ) -> ProductList:
+              items, total = product_service.list_products(
+        new: |-
+          ) -> ProductList:
+              if _demo_fault_active():  # DEMO-DEFECT:slow_api
+                  time.sleep(0.75)
+              items, total = product_service.list_products(
+    runtime_env:
+      STOCKFLOW_DEMO_FAULT: slow_api
+      STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES: "true"
+    expected:
+      stage: post-deploy
+      gate: k6
+      runtime: serve
+      command: "k6 run $(uv run python scripts/quality_policy.py args k6) -e BASE_URL={base_url} load-tests/performance.js"
+      inert_probe: {path: /api/products, max_seconds: 0.5}
+      exit: nonzero
+      output_contains: ["http_req_duration", "p(95)"]
+    reproduce:
+      - "make demo SCENARIO=slow_api DEMO_ARGS=--allow-runtime-failures"
+      - "STOCKFLOW_DEMO_FAULT=slow_api STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES=true PORT=8000 uv run python -m app &"
+      - "k6 run $(uv run python scripts/quality_policy.py args k6) -e BASE_URL=http://127.0.0.1:8000 load-tests/performance.js   # threshold crossed"
+      - "On Render: set both env vars on the service (nothing happens without them)."
+    remediation: "Unset STOCKFLOW_DEMO_FAULT on the service, or revert the patch (`make demo-reset`)."
+    deployment_allowed: true
+    requires: [k6]
+    must_still_pass: [ruff, format, mypy, bandit, coverage]
+    restore_note: "demo-reset restores app/api/products.py"
+
+  # ------------------------------------------------------------------------------------------------
+  - id: unhealthy_health
+    name: "Health endpoint returns 503 (smoke test failure)"
+    category: runtime
+    description: >-
+      GET /health answers 503 {"status":"unhealthy"}, but only when the process env has
+      STOCKFLOW_DEMO_FAULT=unhealthy_health AND STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES=true. PR gates pass;
+      the post-deploy smoke test and Render's health check fail.
+    files: [app/api/health.py]
+    patch:
+      - op: replace_text
+        file: app/api/health.py
+        old: |-
+          from __future__ import annotations
+
+          from fastapi import APIRouter
+        new: |-
+          from __future__ import annotations
+
+          import os  # DEMO-DEFECT:unhealthy_health
+
+          from fastapi import APIRouter
+      - op: replace_text
+        file: app/api/health.py
+        old: |-
+          @router.get("/health")
+          def health() -> dict[str, str]:
+              """Liveness: touches nothing."""
+              return {"status": "ok"}
+        new: |-
+          @router.get("/health", response_model=None)
+          def health() -> dict[str, str] | JSONResponse:
+              """Liveness: touches nothing."""
+              env = os.environ  # DEMO-DEFECT:unhealthy_health
+              if (
+                  env.get("STOCKFLOW_DEMO_FAULT") == "unhealthy_health"
+                  and env.get("STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES") == "true"
+              ):
+                  return JSONResponse(status_code=503, content={"status": "unhealthy"})
+              return {"status": "ok"}
+    runtime_env:
+      STOCKFLOW_DEMO_FAULT: unhealthy_health
+      STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES: "true"
+    expected:
+      stage: post-deploy
+      gate: smoke
+      runtime: serve
+      command: "uv run python scripts/smoke_test.py --base-url {base_url} --timeout 5 --skip-order"
+      exit: nonzero
+      output_contains: ["/health", "503"]
+    reproduce:
+      - "make demo SCENARIO=unhealthy_health DEMO_ARGS=--allow-runtime-failures"
+      - "STOCKFLOW_DEMO_FAULT=unhealthy_health STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES=true PORT=8000 uv run python -m app &"
+      - "uv run python scripts/smoke_test.py --base-url http://127.0.0.1:8000   # fails"
+      - "On Render: set both env vars on the service (nothing happens without them)."
+    remediation: "Unset STOCKFLOW_DEMO_FAULT on the service, or redeploy the previous digest (rollback.yml)."
+    deployment_allowed: true
+    must_still_pass: [ruff, format, mypy, bandit, coverage]
+    restore_note: "demo-reset restores app/api/health.py"
+
+  # ------------------------------------------------------------------------------------------------
+  - id: bad_deployment
+    name: "Service crashes at startup (failed deployment)"
+    category: runtime
+    description: >-
+      create_app raises RuntimeError at boot, but only when the process env has
+      STOCKFLOW_DEMO_FAULT=bad_deployment AND STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES=true. The image builds
+      and every PR gate passes; the container exits on start, Render never reports it healthy, the
+      release `wait` step times out and rollback.yml (by digest) is the recovery.
+    files: [app/main.py]
+    patch:
+      - op: replace_text
+        file: app/main.py
+        old: |-
+          from __future__ import annotations
+
+          from pathlib import Path
+        new: |-
+          from __future__ import annotations
+
+          import os  # DEMO-DEFECT:bad_deployment
+          from pathlib import Path
+      - op: replace_text
+        file: app/main.py
+        old: |-
+          def create_app(settings: Settings | None = None, repository: Repository | None = None) -> FastAPI:
+              """Build the app. Tests pass their own `Settings` and repository."""
+              resolved = settings if settings is not None else get_settings()
+        new: |-
+          def _demo_fault_active() -> bool:  # DEMO-DEFECT:bad_deployment
+              """Two-key runtime gate, read from the process environment only."""
+              env = os.environ
+              return (
+                  env.get("STOCKFLOW_DEMO_FAULT") == "bad_deployment"
+                  and env.get("STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES") == "true"
+              )
+
+
+          def create_app(settings: Settings | None = None, repository: Repository | None = None) -> FastAPI:
+              """Build the app. Tests pass their own `Settings` and repository."""
+              if _demo_fault_active():  # DEMO-DEFECT:bad_deployment
+                  raise RuntimeError("simulated startup failure (STOCKFLOW_DEMO_FAULT=bad_deployment)")
+              resolved = settings if settings is not None else get_settings()
+    runtime_env:
+      STOCKFLOW_DEMO_FAULT: bad_deployment
+      STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES: "true"
+    expected:
+      stage: post-deploy
+      gate: smoke
+      runtime: startup
+      command: "uv run python -m app"
+      exit: nonzero
+      output_contains: ["RuntimeError", "simulated startup failure"]
+    reproduce:
+      - "make demo SCENARIO=bad_deployment DEMO_ARGS=--allow-runtime-failures"
+      - "STOCKFLOW_DEMO_FAULT=bad_deployment STOCKFLOW_DEMO_ALLOW_RUNTIME_FAILURES=true uv run python -m app   # exits 1"
+      - "On Render: set both env vars on the service; the new deploy fails its health check."
+    remediation: "Unset STOCKFLOW_DEMO_FAULT on the service, or roll back to the previous digest."
+    deployment_allowed: true
+    must_still_pass: [ruff, format, mypy, bandit, coverage]
+    restore_note: "demo-reset restores app/main.py"

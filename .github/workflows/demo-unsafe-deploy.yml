@@ -1,0 +1,202 @@
+name: demo-unsafe-deploy
+
+# ##########################################################################################################
+# DEMONSTRATION ONLY. THIS WORKFLOW DELIBERATELY DEPLOYS AN IMAGE THAT THE QUALITY GATES WOULD NOT RELEASE.
+# ##########################################################################################################
+#
+# Purpose: show, on purpose and under supervision, what happens when a bad build reaches Render and how the
+# rollback workflow recovers. It is not part of the delivery pipeline and nothing triggers it automatically.
+#
+# Guards
+#   * workflow_dispatch only (never pull_request, push or schedule).
+#   * Runs only from main, and only after the typed confirmation below matches exactly.
+#   * Everything that touches the deploy hook is in environment `demo-unsafe`. Configure that environment
+#     with REQUIRED REVIEWERS (a second person must approve each run) and, if you can, its own
+#     RENDER_DEPLOY_HOOK_URL secret and STOCKFLOW_BASE_URL variable that point at a separate demo service.
+#     If it points at the production service, expect production to serve the broken image until you run
+#     rollback.yml.
+#   * Deploys an image that is ALREADY PUBLISHED by digest (ghcr.io/<owner>/stockflow@sha256:...). It builds
+#     nothing. How the broken image gets into GHCR is a presenter step (see docs/DEMO_RUNBOOK.md): inject a
+#     scenario on a demo branch, `make docker-build`, then tag and push it yourself.
+#
+# What Render does (https://render.com/docs/health-checks, /docs/deploys):
+#   * A new instance receives no traffic until its health check path (/health) passes; the previous instance
+#     keeps serving meanwhile (zero-downtime deploy).
+#   * If the new instance does not become healthy within 15 minutes, Render cancels the deploy and keeps
+#     routing to the existing instance.
+#   * Render does NOT roll back automatically. A bad image that still answers /health (a logic defect, for
+#     example a wrong order total) passes Render's check and goes LIVE; only the smoke test below notices.
+#     Recovery is manual: run rollback.yml with the previous good digest.
+# Expected result of this workflow is therefore a RED run (smoke test or deploy failure). That is the demo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "Digest of the already-published demo image: sha256:<64 hex>"
+        type: string
+        required: true
+      scenario:
+        description: "Defect scenario id the image was built from (recorded only)"
+        type: string
+        required: true
+      confirmation:
+        description: "Type exactly: DEPLOY-BROKEN-IMAGE"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  guard:
+    name: guard
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      version: ${{ steps.inspect.outputs.version }}
+      git_sha: ${{ steps.inspect.outputs.git_sha }}
+    env:
+      INPUT_DIGEST: ${{ inputs.image_digest }}
+      INPUT_SCENARIO: ${{ inputs.scenario }}
+      INPUT_CONFIRMATION: ${{ inputs.confirmation }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Typed confirmation and scenario id
+        run: |
+          if [ "$INPUT_CONFIRMATION" != "DEPLOY-BROKEN-IMAGE" ]; then
+            echo "::error title=Not confirmed::type exactly DEPLOY-BROKEN-IMAGE to proceed"
+            exit 1
+          fi
+          if ! printf '%s' "$INPUT_SCENARIO" | grep -Eq '^[a-z][a-z0-9_]{2,40}$'; then
+            echo "::error title=Bad scenario id::expected a snake_case scenario id"
+            exit 1
+          fi
+      - name: Validate the digest format and build the image reference
+        id: ref
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "owner=${owner}" >> "$GITHUB_ENV"
+          python3 scripts/deploy/release_tools.py image-ref --owner "$owner" --digest "$INPUT_DIGEST"
+      - name: Log in to GHCR (read-only token)
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: The digest must exist in GHCR
+        id: inspect
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+        run: python3 scripts/deploy/release_tools.py inspect --image "$IMAGE" --expect-owner "$owner"
+
+  deploy-unsafe:
+    name: deploy-unsafe
+    needs: [guard]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: demo-unsafe # configure REQUIRED REVIEWERS on this environment
+    permissions:
+      contents: read
+    env:
+      IMAGE: ${{ needs.guard.outputs.image }}
+      VERSION: ${{ needs.guard.outputs.version }}
+      DEMO_SHA: ${{ needs.guard.outputs.git_sha }}
+      DEPLOY_REASON: "DEMO ONLY: scenario ${{ inputs.scenario }}"
+      HOOK_CONFIGURED: ${{ secrets.RENDER_DEPLOY_HOOK_URL != '' }}
+      RENDER_API_CONFIGURED: ${{ secrets.RENDER_API_KEY != '' && secrets.RENDER_SERVICE_ID != '' }}
+      STOCKFLOW_BASE_URL: ${{ vars.STOCKFLOW_BASE_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Banner
+        run: |
+          {
+            echo "## DEMONSTRATION: deploying an image that bypassed the quality gates"
+            echo
+            echo "- image: \`${IMAGE}\`"
+            echo "- baked git sha: \`${DEMO_SHA}\`"
+            echo "- Render keeps the previous instance serving until the new one passes /health, then cancels after 15 minutes;"
+            echo "  it does **not** roll back on its own. Recover with the rollback workflow."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning title=DEMO ONLY::deploying an intentionally unsafe image"
+      - name: Is live deployment configured?
+        id: preflight
+        run: python3 scripts/deploy/release_tools.py preflight
+      - name: Cannot demonstrate without a target
+        if: steps.preflight.outputs.configured != 'true'
+        run: |
+          echo "::error title=No demo target::configure the demo-unsafe environment secret RENDER_DEPLOY_HOOK_URL and variable STOCKFLOW_BASE_URL"
+          exit 1
+      - name: Record what is serving before the deploy
+        if: steps.preflight.outputs.configured == 'true'
+        env:
+          BASE_URL: ${{ steps.preflight.outputs.base_url }}
+        run: python3 scripts/deploy/release_tools.py observe --base-url "$BASE_URL" --label "before"
+      - name: Load smoke settings from the policy
+        run: |
+          echo "SMOKE_TIMEOUT=$(uv run python scripts/quality_policy.py get smoke.timeout_seconds)" >> "$GITHUB_ENV"
+          echo "SMOKE_INTERVAL=$(uv run python scripts/quality_policy.py get smoke.poll_interval_seconds)" >> "$GITHUB_ENV"
+      - name: Trigger the Render deploy for the demo digest
+        id: deploy
+        if: steps.preflight.outputs.configured == 'true'
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          python3 scripts/deploy/deploy_render.py --image "$IMAGE" --expect-owner "$GITHUB_REPOSITORY_OWNER" \
+            --wait-timeout "$SMOKE_TIMEOUT" --wait-interval "$SMOKE_INTERVAL"
+      - name: Verify (a failure here is the expected, instructive outcome)
+        id: verify
+        if: steps.preflight.outputs.configured == 'true'
+        env:
+          BASE_URL: ${{ steps.preflight.outputs.base_url }}
+        run: python3 scripts/smoke_test.py --base-url "$BASE_URL" --expect-sha "$DEMO_SHA" --timeout "$SMOKE_TIMEOUT"
+      - name: Record what is serving after the deploy
+        if: always() && steps.preflight.outputs.configured == 'true'
+        env:
+          BASE_URL: ${{ steps.preflight.outputs.base_url }}
+        run: python3 scripts/deploy/release_tools.py observe --base-url "$BASE_URL" --label "after"
+      - name: Record the demonstration
+        if: always()
+        env:
+          CONFIGURED: ${{ steps.preflight.outputs.configured }}
+          BASE_URL: ${{ steps.preflight.outputs.base_url }}
+          DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify.outcome }}
+        run: |
+          set -euo pipefail
+          configured=false
+          if [ "$CONFIGURED" = "true" ]; then configured=true; fi
+          python3 scripts/deploy/release_tools.py record --kind demo-unsafe --image "$IMAGE" --version "$VERSION" \
+            --git-sha "$DEMO_SHA" --base-url "$BASE_URL" --configured "$configured" \
+            --deploy-outcome "$DEPLOY_OUTCOME" --verify-outcome "$VERIFY_OUTCOME" \
+            --out reports/demo-unsafe-record.json
+      - name: Upload record
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: demo-unsafe-record
+          path: |
+            reports/demo-unsafe-record.json
+            reports/deploy-result.json
+          if-no-files-found: warn
+          retention-days: 30
