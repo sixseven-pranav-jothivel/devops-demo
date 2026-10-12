@@ -246,3 +246,48 @@ def test_preflight_requires_https_for_a_real_host() -> None:
 def test_fetch_version_refuses_plain_http_to_a_real_host() -> None:
     with pytest.raises(lib.DeployError, match="https"):
         lib.fetch_version("http://stockflow.onrender.com")
+
+
+# ---- the preview client and the GitHub client share the same no-redirect transport
+def test_preview_create_never_forwards_key_or_body_on_a_redirect(
+    target: tuple[http.server.HTTPServer, list[dict[str, str]]],
+    tls_cert: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import preview_lib as pv  # noqa: PLC0415
+
+    other, received = target
+    monkeypatch.setenv("SSL_CERT_FILE", str(tls_cert))
+    api_server = start_redirect_tls(f"http://localhost:{other.server_port}/steal", tls_cert)
+    try:
+        monkeypatch.setattr(lib, "RENDER_API", f"https://localhost:{api_server.server_port}/v1")
+        api = pv.PreviewApi("RENDER-SECRET-KEY", "srv-base1")
+        with pytest.raises(lib.DeployError, match="redirect") as info:
+            api.create(IMAGE, "stockflow-pr-1")
+        assert "RENDER-SECRET-KEY" not in str(info.value)
+        assert received == []
+    finally:
+        api_server.shutdown()
+        api_server.server_close()
+
+
+def test_github_client_never_forwards_the_token_on_a_redirect(
+    target: tuple[http.server.HTTPServer, list[dict[str, str]]],
+    tls_cert: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import preview_lib as pv  # noqa: PLC0415
+
+    other, received = target
+    monkeypatch.setenv("SSL_CERT_FILE", str(tls_cert))
+    gh_server = start_redirect_tls(f"http://localhost:{other.server_port}/steal", tls_cert)
+    try:
+        monkeypatch.setattr(pv, "GITHUB_API", f"https://localhost:{gh_server.server_port}")
+        github = pv.GitHubApi("ghs_SECRET_TOKEN", "octo-org/stockflow-demo")
+        with pytest.raises(lib.DeployError, match="redirect") as info:
+            github.upsert_comment(1, "hello")
+        assert "ghs_SECRET_TOKEN" not in str(info.value)
+        assert received == []
+    finally:
+        gh_server.shutdown()
+        gh_server.server_close()

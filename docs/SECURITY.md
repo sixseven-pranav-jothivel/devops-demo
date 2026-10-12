@@ -4,7 +4,7 @@ Owner: security agent. Contract: `docs/ARCHITECTURE.md` sections 10-13. Threshol
 `config/quality-policy.yaml`; this document explains them, it does not redefine them. Where a number is
 quoted below, `python scripts/quality_policy.py get <key>` is authoritative.
 
-Contents: 1 Principles - 2 Threat model - 3 Action pinning - 4 Workflow permissions - 5 Secrets inventory -
+Contents (section 10.9 reviews the PR preview workflow): 1 Principles - 2 Threat model - 3 Action pinning - 4 Workflow permissions - 5 Secrets inventory -
 6 Scanner policy - 7 Exceptions - 8 Known limitations - 9 Verified commands - 10 DevOps hand-off -
 11 Backend and demo requirements - 12 Design note for `tests/test_quality_policy.py`
 
@@ -47,6 +47,11 @@ restart). Authentication is out of scope for this demo (see 8).
 | T12 | Tampering with the deployment record or rollback target | wrong digest | Rollback input must match `sha256:[0-9a-f]{64}`, existence verified with `docker manifest inspect`, rollback never rebuilds; digest is the identity in the record | Record is a workflow artifact (90 days), not tamper-evident storage |
 | T13 | A defective image reaches Render deliberately (controlled failed deployment demo) | presenter builds a scenario image and pushes it to GHCR by hand, then runs `demo-unsafe-deploy.yml` | `release.yml` can never publish a defective build (all gates + Trivy on the exact image precede `publish`, and baseline guard rejects `DEMO-DEFECT` markers); the demo path is separate: `workflow_dispatch` only, main-only, exact typed confirmation `DEPLOY-BROKEN-IMAGE`, snake_case scenario id validation, digest must already exist in GHCR, runs in environment `demo-unsafe` (configure **required reviewers**; prefer its own hook secret and `STOCKFLOW_BASE_URL` pointing at a separate demo service); the manual push is made with the presenter's own credentials, never by CI; recovery is `rollback.yml` by digest | **Accepted risk**: if `demo-unsafe` shares the production hook, production serves the broken image until rollback; a presenter PAT with `write:packages` exists on a workstation; the manually pushed demo image sits in the public GHCR package under a sha/demo tag (delete the version after the demo) |
 | T14 | Poisoned build cache or artifact hand-off | `actions/cache` (uv, Trivy DB), the image tarball and the `release-record` artifact passed between jobs | Caches are written only by branch-scoped runs (PR caches cannot be read by `main`); the tarball is produced and consumed inside one run (retention 1 day) and `publish` verifies its sha256 (reported by `build-scan` as a job output) before `docker load`; `publish` pushes those bytes and then verifies the registry labels name this commit; `deploy` downloads `release-record` by **name only** (no `run-id`, no `github-token`), which `download-artifact` resolves to artifacts of the current run, and uses it only as a cross-check (`verify-deployment`), never as the source of the image to deploy (that comes from the `publish` job output) | A cache written by a compromised `main` run could hide advisory-DB entries; the artifact service is trusted within a run |
+| T15 | PR preview: workspace-wide Render API key reachable from PR-controlled workflow | `pr-preview.yml` runs on `pull_request`, so GitHub uses the workflow file **from the PR merge commit**: anyone who can push a branch to this repository can edit the `preview` / `cleanup` job and print or send `RENDER_API_KEY` | No `pull_request_target`; forks and Dependabot get no preview (job-level `if` plus `preview_lib.decide`, deny by default); secrets exist only in environment `preview`, are exposed as `env:` of one step, and `build-scan` (the job that runs PR code) has none; privileged jobs check out the **base** branch and run base scripts; the key is only sent to `https://api.render.com` without redirects; scripts can delete only a service named `stockflow-pr-<n>` and refuse the base service | **Not preventable inside the workflow file.** The environment protection rules are the control (6, 8): dedicated Render workspace and user so the key cannot reach production, required reviewers with self-review prevented, deployment-branch rule `refs/pull/*/merge`. Writers are trusted by design |
+| T16 | Authorization and gate bypass for previews | `labeled` by anyone with triage or write; `quality-gate` check spoofed; label stays on the PR when new commits are pushed | Only same-repo, non-Dependabot PRs with the `preview` label; label events need triage/write rights (a non-collaborator cannot label); `wait-gate` accepts only a `quality-gate` check run created by the GitHub Actions app for the exact head sha; `build-scan`, Trivy and smoke run before anything is published | The label is not a security boundary against write users (they can label their own PR), and the gate is **not authentication**: any workflow on the same commit that defines a job named `quality-gate`, including one edited in the PR, satisfies it. Later pushes to a labelled PR are deployed without a new human decision |
+| T17 | Preview lifecycle races leave live previews | update event cancels a queued or running cleanup (`pr-preview.yml:33-35`); `closed` only cleans up when the label is still on the PR (`preview_lib.py:90`); API outage during cleanup | Cleanup is idempotent (a missing preview is fine); the preview is named `stockflow-pr-<n>`, so the next deploy finds and reuses it; `report` states `cleanup_failed` | **Open (cost/availability, not confidentiality).** An orphaned billable preview serving PR code can remain after unlabel + push + close. See 10.9 finding 1 for the fix |
+| T18 | GHCR `pr-<n>` tags accumulate and share the production package | every `synchronize` pushes `pr-<n>` and `pr-<n>-<sha7>` to `ghcr.io/<owner>/stockflow`; nothing deletes them; Render requires the preview image path to match the base service's | `publish` pushes only after the sha256 check and only tags derived from the PR number and sha7; production and rollback deploy **by digest**, never by tag; the release/rollback paths validate `sha256:` digests and OCI labels | Package clutter and storage use; a write user can overwrite mutable tags such as `<version>` through any workflow with `packages: write` (this already held before previews); `render.yaml`'s default tag must not be relied on for production |
+| T19 | Preview inherits base-service settings and unverified Render behaviour | `POST /v1/services/{id}/preview` copies the base service settings including env vars | The base service carries no secrets (`DEPLOY_ENVIRONMENT`, `REPOSITORY_BACKEND` only); previews are deployed by digest and smoke-tested for the head sha | The preview reports `DEPLOY_ENVIRONMENT=production`; whether a preview of a free base service can stay free, whether `imagePath` accepts `repo@sha256:...`, and the whole API flow are **unverified** (`preview_lib.py` header says so). **Never add secrets to the base service's environment variables**: PR code would receive them in the preview |
 
 ---------------------------------------------------------------------------------------------------
 
@@ -102,17 +107,18 @@ by a job without `environment:`, and any non-`GITHUB_TOKEN` secret in a workflow
 | Workflow | Trigger | Top level | Job-level permissions | Secrets read | Environment |
 |---|---|---|---|---|---|
 | `ci.yml` | `pull_request` (main), `push` (main), `workflow_dispatch`, `workflow_call` | `contents: read` | none | none (fork-safe, secret-free) | none |
-| `release.yml` | `push` to `main` (deploy mandatory), `workflow_dispatch` (`require_deploy`, default true) | `contents: read` | job `ci` (reusable ci.yml): `contents: read`; `build-scan`: `contents: read`; **`publish`: `contents: read` + `packages: write` (the only write in the repo)**; `deploy`: `contents: read` only (its `download-artifact` of `release-record` needs no `actions: read`, see below) | `GITHUB_TOKEN` (publish login); `RENDER_DEPLOY_HOOK_URL`, `RENDER_API_KEY`, `RENDER_SERVICE_ID` in `deploy` only | `deploy` -> `production` |
+| `release.yml` | `push` to `main` (deploy mandatory), `workflow_dispatch` (`require_deploy`, default true) | `contents: read` | job `ci` (reusable ci.yml): `contents: read`; `build-scan`: `contents: read`; **`publish`: `contents: read` + `packages: write` (with `pr-preview.yml` `publish`, the only `packages: write`)**; `deploy`: `contents: read` only (its `download-artifact` of `release-record` needs no `actions: read`, see below) | `GITHUB_TOKEN` (publish login); `RENDER_DEPLOY_HOOK_URL`, `RENDER_API_KEY`, `RENDER_SERVICE_ID` in `deploy` only | `deploy` -> `production` |
 | `rollback.yml` | `workflow_dispatch` only, main only | `contents: read` | `verify-image`: `contents: read` + `packages: read`; `rollback`: `contents: read` | `GITHUB_TOKEN` (read login); hook and API credentials in `rollback` only | `rollback` -> `production` |
 | `demo-unsafe-deploy.yml` | `workflow_dispatch` only, main only, typed confirmation | `contents: read` | `guard`: `contents: read` + `packages: read`; `deploy-unsafe`: `contents: read` | `GITHUB_TOKEN`; hook and API credentials in `deploy-unsafe` only | `deploy-unsafe` -> `demo-unsafe` (needs required reviewers) |
 | `perf.yml` | `workflow_dispatch` only (typed `WRITE`) | `contents: read` | none | none (secret-free; uses variable `STOCKFLOW_BASE_URL`) | none |
 | `demo-fixtures.yml` | weekly `schedule` (Mon 05:17 UTC) + `workflow_dispatch` | `contents: read` | none | none (secret-free) | none |
+| `pr-preview.yml` | `pull_request` to `main` (`labeled`, `unlabeled`, `synchronize`, `reopened`, `closed`) | `contents: read` | `decide`: `contents: read`; `gate`: `contents: read` + `checks: read`; `build-scan`: `contents: read` (runs PR code, no secrets); **`publish`: `contents: read` + `packages: write`** (no secrets, no PR code, sha256-verified tarball, base-branch scripts); `preview`, `cleanup`: `contents: read`; **`report`: `contents: read` + `pull-requests: write`** (no secrets, no PR code, sanitised comment) | `GITHUB_TOKEN` (gate, publish, report); `RENDER_API_KEY`, `RENDER_SERVICE_ID` in `preview` and `cleanup` only | `preview`, `cleanup` -> `preview` |
 
 Job names in release.yml: `ci` -> `build-scan` -> `publish` -> `deploy`. `release.yml`, `rollback.yml` and
 `demo-unsafe-deploy.yml` share concurrency group `deploy-production` (`cancel-in-progress: false`), so a
 demo deployment, a release and a rollback can never overlap.
 
-Not allowed anywhere: `contents: write`, `id-token`, `pull-requests: write`, `actions: write`,
+Write permissions are allow-listed per file in the policy: `packages: write` for `release.yml` and `pr-preview.yml`, `pull-requests: write` for `pr-preview.yml` only (the sticky comment). Not allowed anywhere: `contents: write`, `id-token`, `actions: write`,
 `security-events: write` (so no SARIF/code-scanning upload; scanner output is kept as workflow artifacts),
 `pull_request_target`, `secrets: inherit`, `continue-on-error: true`.
 A new write permission requires a policy change plus a justification in the PR.
@@ -126,6 +132,8 @@ A new write permission requires a policy change plus a justification in the PR.
 | `RENDER_DEPLOY_HOOK_URL` | secret | **environment** `production` (and, separately, `demo-unsafe`); never repository-wide | `deploy` (release), `rollback`, `deploy-unsafe` via `scripts/deploy/deploy_render.py` | URL contains the hook key; passed as `env:` to one step; masked; rotate by regenerating the hook in Render |
 | `RENDER_API_KEY` | secret, **optional** | same environments | same step; `deploy_lib.RenderApi` issues only GET requests to `https://api.render.com/v1` (list/get deploys) to report whether the deploy went `live` | Render API keys are **not scopable**: they carry the owner's full account rights. Create the key under a dedicated Render user/workspace with access to this one service if possible. Without it the pipeline still works and infers status from `/api/version` + smoke test |
 | `RENDER_SERVICE_ID` | secret, **optional** | same environments | same step | identifier (`srv-...`), validated against `[A-Za-z0-9_-]{3,64}`; treated as a secret only to keep it out of logs |
+| `RENDER_API_KEY`, `RENDER_SERVICE_ID` (preview) | secrets | **environment `preview`** only; must differ from the `production` / `demo-unsafe` values | `preview` and `cleanup` jobs of `pr-preview.yml` via `scripts/deploy/preview_tools.py` (create / find / redeploy / delete previews of the base service) | Here the key is **not** read-only: it creates and deletes services. Render keys are not scopable, so use a dedicated Render user that belongs only to a dedicated preview workspace containing a separate base service (6 and the settings in 10.9) |
+| `PREVIEW_PLAN` | variable, optional | environment `preview` | `preview` job | validated against `^[a-z0-9][a-z0-9_.-]{0,31}$`; unset = the base service's plan |
 | `STOCKFLOW_BASE_URL` | variable | repository or environment | preflight, smoke, perf | public URL, not secret |
 | `GITHUB_TOKEN` | automatic, per job | per job, see 4 | GHCR login: write in `publish` only; read in `verify-image`/`guard` | no PAT is used by any workflow |
 | (none) | - | - | the application | no API keys, DB credentials or signing keys exist; `REPOSITORY_BACKEND=memory` |
@@ -267,6 +275,15 @@ with no other change.
   scan; once it has, run a history-aware scanner once (for example `gitleaks detect`) before making it public.
 - Render image pull from a public GHCR package is unauthenticated; GHCR rate limits can in theory delay a
   deploy.
+- **PR previews trust the people who can push branches here.** Because `pr-preview.yml` is a `pull_request`
+  workflow, its definition comes from the PR merge commit; a writer can change it to read the `preview`
+  environment's secrets. Environment rules (10.9) and a dedicated Render workspace limit the damage; they do
+  not remove the risk. Fork and Dependabot PRs are excluded and cannot reach those secrets.
+- The `quality-gate` check used to authorise a preview is spoofable by any workflow on the same commit, and the
+  Trivy/test steps of a PR image run PR-controlled commands: for previews they are advisory, not a trust anchor.
+- Previews: GHCR `pr-<n>` tags are never deleted; the Render preview flow (free plan, digest form of
+  `imagePath`, inherited env vars including `DEPLOY_ENVIRONMENT=production`) is unverified; cleanup can be lost to a
+  concurrency race (T17).
 - Single worker, in-memory data: a restart loses state by design.
 - Dev VM quirk (aarch64 + containerd image store): `trivy image` with the default Docker source fails on a
   foreign-platform amd64 image (`content digest ... not found`). Use the tarball route in 9 (the Makefile
@@ -447,6 +464,59 @@ Open findings for devops (not in security's ownership):
 6. **INFO**: because deployment is now mandatory on push, the first push to `main` before the Render service,
    `RENDER_DEPLOY_HOOK_URL` and `STOCKFLOW_BASE_URL` exist ends red by design (after publishing the image);
    `docs/SETUP_GITHUB_RENDER.md` must say so.
+
+### 10.9 PR preview review (2026-10-11): `pr-preview.yml`, `preview_lib.py`, `preview_tools.py`
+
+Verdict: acceptable **for a repository where everyone with write access is trusted**, with the environment
+settings below. No path exists for a fork, Dependabot or non-collaborator to reach the Render credentials, and
+no PR code runs in a job that holds a secret or `packages: write`/`pull-requests: write`.
+
+Checked and sound: no `${{ }}` inside any `run:` (event data arrives as `env:`, `with: ref:` values are not shell);
+job-level guard plus script-level `decide` (deny by default, `closed`/`unlabeled`/`labeled`/`synchronize`/`reopened`
+table); `build-scan` (PR code) has no secrets and no write permission; `publish` verifies the tarball sha256 and
+runs base scripts; `preview`/`cleanup` run base scripts, validate the image ref as a digest of this owner, and
+refuse to delete the base service; Render and GitHub clients are https-only with redirects refused; the preview
+URL must be `https://<name>.onrender.com` before it is smoke-tested or shown; every comment value passes `md_safe`.
+
+Exact `preview` environment settings (GitHub -> Settings -> Environments -> `preview`):
+1. **Required reviewers**: at least one maintainer who is not the usual PR author; enable **Prevent self-review**.
+   A malicious workflow edit still reaches the secret only after a reviewer approved the run, so approvers must
+   read the diff of `.github/` and `scripts/deploy/` first. Trade-off: every deploy and cleanup waits for approval.
+   For a one-person demo repository this may be omitted, accepting T15.
+2. **Deployment branches and tags -> Selected**: add the pattern `refs/pull/*/merge` (PR runs execute on that ref; the
+   behaviour of this rule for `pull_request` events is community-documented and not verified by us). It stops any
+   push-, schedule- or dispatch-triggered workflow on another branch from using the environment. It does **not**
+   restrict which collaborator opens the PR, so it is not a substitute for item 1.
+3. **Disable "Allow administrators to bypass"**.
+4. **Secrets**: `RENDER_API_KEY` and `RENDER_SERVICE_ID` only here, never repository- or organization-wide, never the
+   production values.
+5. **Blast radius (most important)**: create a separate Render workspace for previews with its own base image-backed
+   service (the same GHCR image path), create the API key from a dedicated Render user that is a member of that
+   workspace only, and put that service's id in the secret. An exfiltrated key then cannot touch production.
+6. Repository: CODEOWNERS for `.github/**`, `scripts/deploy/**`, `Dockerfile`, `config/**`; label `preview` only after
+   reading those diffs; keep the base service free of secret env vars (T19).
+
+Findings for DevOps (file:line):
+1. **MEDIUM, `.github/workflows/pr-preview.yml:33-35` with `scripts/deploy/preview_lib.py:90`.** A pending or running
+   cleanup (`unlabeled`, `closed`) is cancelled by a later update event because `cancel-in-progress` is evaluated by
+   the *new* run, and GitHub replaces a pending run in the same group. Sequence: `labeled` (deploying) ->
+   `unlabeled` (queued cleanup) -> `synchronize` (cancels both; it has no label, so it skips) -> `closed` (no label, so
+   `decide` skips) -> the preview is orphaned and keeps serving PR code. Fix: (a) make `closed` always clean up
+   (`preview_lib.py:90`: `(True, "cleanup", ...)`; with the `preview` reviewer rule use `preflight --optional` and
+   accept an approval prompt, or move deletion out of the protected environment's approval by adding a scheduled
+   sweeper); (b) re-check, with the GitHub API right before and after `deploy_preview`, that the PR is still open and
+   labelled and delete the preview if not; (c) optionally give cleanup events their own concurrency group
+   (`pr-preview-<n>-cleanup`) so an update can never cancel them.
+2. **LOW, `scripts/deploy/preview_lib.py:343`.** `find_comment` accepts any comment whose body has the marker and whose
+   author `type` is `Bot`; another GitHub App could be edited by the report job. Require
+   `user.login == "github-actions[bot]"` as well.
+3. **INFO, `scripts/deploy/preview_lib.py` `gate_state`.** Requiring the Actions app is good, but the check name is
+   spoofable by any workflow on the commit (T16); document it as advisory. A stronger variant is to query
+   `/actions/runs?head_sha=<sha>&event=pull_request` and require `ci.yml` to be `success`, which still comes from the
+   PR's own workflow.
+4. **INFO, `.github/workflows/pr-preview.yml` `publish`.** Pushes into the production package; document that tags are
+   never trusted. A scheduled job to delete old `pr-<n>*` versions needs `packages: write` plus delete rights and is not
+   part of this design.
 
 ---------------------------------------------------------------------------------------------------
 

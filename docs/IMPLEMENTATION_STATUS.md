@@ -10,10 +10,10 @@ Last synchronised: 2026-10-10 (repository has no commits and no remote).
 
 | Check | Command | Result |
 |---|---|---|
-| Tests + coverage | `uv run pytest -q --cov` | **1322 passed** in 69 s; branch coverage **100.00 %** (849 stmts, 104 branches; policy floor 85) |
-| Marker split | `pytest --collect-only -m <marker>` | unit 343, integration 843 (concurrency 18 inside it), demo 117 (includes the deploy-helper tests under `tests/deploy/`) |
+| Tests + coverage | `uv run pytest -q --cov` | **1431 passed** in 69 s; branch coverage **100.00 %** (849 stmts, 104 branches; policy floor 85) |
+| Marker split | `pytest --collect-only -m <marker>` | unit 441, integration 843 (concurrency 18 inside it), demo 117 (unit includes `tests/deploy/`, now with `test_preview.py`) |
 | Lint / format / types | `make lint format-check typecheck` | ruff: All checks passed; 73 files formatted; mypy strict: no issues in 36 source files |
-| Config validation | `make policy-check lock-check` | quality policy OK; `uv.lock` in sync (65 packages) |
+| Config validation | `make policy-check` | **FAILS** (2 problems): `pr-preview.yml: job publish requests packages: write, not allowed by policy`; `pr-preview.yml: job report requests pull-requests: write, not allowed by policy`. The policy (security) allows `packages: write` only in release.yml and `pull-requests` nowhere. This turns the CI `config-validation` job, and therefore `quality-gate`, red on the current tree |
 | Security gates | `make security` | exit 0: policy-check, bandit "No issues identified", pip-audit "No known vulnerabilities found", trivy fs `uv.lock` 0 vulnerabilities, trivy config `Dockerfile` 0 misconfigurations |
 | Container | `make docker-test` | exit 0: linux/amd64 image built, ran with `PORT=9123`, smoke test PASSED (version == baked sha), 8/8 image-guard checks, demo image-guard OK, SIGTERM stop in 1 s with exit 0 |
 | Defect scenarios | `uv run python -m demo verify-all` | **13 passed, 0 failed, 0 skipped**; each: fails as expected at its real gate, signature matched, other gates stay green, exact reset, clean re-run passes; live tree afterwards `no scenario active`, no `DEMO-DEFECT` marker in `app/`, `pyproject.toml`, `uv.lock`, `Dockerfile` |
@@ -49,7 +49,7 @@ but were not re-run here), and `make perf`.
 - [ ] `tax_rate` context key so the order preview follows `TAX_RATE` (backend, optional)
 
 ## Phase 4 - Tests (qa)
-- [x] unit, service, repository contract, API, invariants, concurrency tests (1322 pass)
+- [x] unit, service, repository contract, API, invariants, concurrency tests (1431 pass)
 - [x] coverage 100.00 % branch, floor 85 enforced by `make test-coverage` and mirrored in the policy
 - [x] scripts/smoke_test.py (exercised against the container)
 - [x] load-tests (`performance.js`, `smoke.js`); `slow_api` verification drives k6 successfully
@@ -70,6 +70,11 @@ but were not re-run here), and `make perf`.
 ## Phase 7 - CI/CD (devops)
 - [x] Workflows written: ci.yml (aggregate `quality-gate`), release.yml (`ci`, `build-scan`, `publish`, `deploy`), rollback.yml, demo-unsafe-deploy.yml, perf.yml; local composite actions; dependabot
 - [x] Policy `check` validates action pinning, permissions and drift scan over these files
+- [x] pr-preview.yml written (jobs decide, gate, build-scan, publish, preview, cleanup, report) with `scripts/deploy/preview_lib.py`, `preview_tools.py` and `tests/deploy/test_preview.py` (44 test functions) passing locally against a fake Render/GitHub
+- [ ] **Policy blocks pr-preview.yml**: security must extend `actions.allowed_job_write_permissions` (`packages: [release.yml, pr-preview.yml]`, `pull-requests: [pr-preview.yml]`) in config/quality-policy.yaml and SECURITY.md; until then `make policy-check` and two QA tests fail
+- [ ] pr-preview.yml executing on GitHub/Render (label opt-in, quality-gate wait, digest-based `POST /v1/services/{id}/preview`, redeploy, cleanup, sticky comment): **NOT VERIFIED / BLOCKED**
+- [ ] Render points unconfirmed for previews (**NOT VERIFIED**): free-plan base -> free preview (`PREVIEW_PLAN` left unset), `imagePath` accepting `repo@sha256:digest`, preview URL shape `https://<name>.onrender.com`, inherited env vars (`DEPLOY_ENVIRONMENT=production`), redeploy by `imageUrl` for an existing preview
+- [ ] Environment `preview` created with `RENDER_API_KEY` / `RENDER_SERVICE_ID` and deployment-branch/reviewer rules: **BLOCKED** (manual repository setting)
 - [ ] actionlint run over the workflows (`make workflow-lint`): not run in this pass
 - [ ] `ci.yml` executing on GitHub: **NOT VERIFIED** (no remote)
 - [x] release.yml written so that a push to main REQUIRES a verified deployment: unconfigured hook/base URL fails `deploy` (publish to GHCR and `release-record.json` still happen first); manual `require_deploy` defaults to true; `release_tools.py verify-deployment` compares release-record digest, the imgURL digest and the live `/api/version`; `deployed: true` / "DEPLOYED and verified" only when all passed. Unit-tested helper logic (`tests/deploy/`) passes locally
@@ -93,7 +98,7 @@ but were not re-run here), and `make perf`.
 - [ ] every documented command executed and verified
 
 ## Phase 10 - Integration and release readiness
-- [x] Clean baseline passes: tests + coverage, lint, format, types, policy, `make security`
+- [ ] Clean baseline passes every gate: lint, format, types, coverage and `make security` pass on their own, but `make policy-check` and two policy tests FAIL because of pr-preview.yml permissions (see summary); re-tick after security updates the policy
 - [x] `make docker-test` green on the linux/amd64 image
 - [x] `demo-verify-all` green; `demo-reset` leaves a clean tree (`no scenario active`, no markers)
 - [ ] `make quality` as a single command: its components passed individually; the single-command run was

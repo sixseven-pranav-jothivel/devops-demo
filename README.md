@@ -31,10 +31,11 @@ problem and then show the fix.
 5. [Architecture](#architecture)
 6. [Triggering and resetting defects](#triggering-and-resetting-defects)
 7. [CI/CD overview](#cicd-overview)
-8. [Deployment configuration](#deployment-configuration)
-9. [Security architecture](#security-architecture)
-10. [Limitations (read this)](#limitations-read-this)
-11. [Documentation map](#documentation-map)
+8. [PR demos (optional previews)](#pr-demos-optional-previews)
+9. [Deployment configuration](#deployment-configuration)
+10. [Security architecture](#security-architecture)
+11. [Limitations (read this)](#limitations-read-this)
+12. [Documentation map](#documentation-map)
 
 ## Screenshots
 
@@ -135,8 +136,8 @@ Every gate is a Make target and every threshold comes from [`config/quality-poli
 | `make lint` | `ruff check .` | `All checks passed!` |
 | `make format-check` | `ruff format --check .` | `73 files already formatted` |
 | `make typecheck` | `mypy` (strict) | `Success: no issues found in 36 source files` |
-| `make test` | `pytest` (all tests) | `1322 passed` |
-| `make test-coverage` | pytest + branch coverage, fails under the policy threshold | `Required test coverage of 85% reached. Total coverage: 100.00%`, `1322 passed` |
+| `make test` | `pytest` (all tests) | `1431 passed` |
+| `make test-coverage` | pytest + branch coverage, fails under the policy threshold | `Required test coverage of 85% reached. Total coverage: 100.00%`, `1431 passed` |
 | `make security` | policy check, bandit, pip-audit, trivy fs, trivy config | `quality policy OK`; bandit `No issues identified.`; pip-audit `No known vulnerabilities found`; trivy fs and config: 0 findings |
 | `make quality` | lint, format-check, typecheck, test-coverage, security | exit 0 |
 | `make policy-check`, `make lock-check`, `make workflow-lint` | policy/mirror/drift check, `uv lock --check`, actionlint | all exit 0 |
@@ -271,6 +272,7 @@ Per-scenario commands, expected output and presenter notes: [docs/DEMO_RUNBOOK.m
 | [`release.yml`](.github/workflows/release.yml) | push to `main`, manual (`require_deploy`) | re-runs `ci.yml` for that commit; `build-scan` (build amd64, run + smoke test + image guard, Trivy on the exact image); `publish` (the only job with `packages: write`: pushes the `sha-<sha>` and `<version>` tags, captures the digest, verifies the registry's OCI labels, writes `release-record.json`); `deploy` (environment `production`: preflight, deploy hook with `imgURL=ghcr.io/<owner>/stockflow@sha256:...`, smoke test with `--expect-sha`, then `release_tools.py verify-deployment`, which requires the release record, the digest sent in `imgURL` and the live `/api/version` to agree on digest, commit, version and name; `deployment-record.json`). **Deployment is mandatory on every push to `main`**: a run is green only after all of that passed. |
 | [`rollback.yml`](.github/workflows/rollback.yml) | manual: `image_digest`, `reason` | verifies the digest exists in GHCR, redeploys exactly that digest (no rebuild), verifies `/api/version.git_sha` equals the restored image's sha, records it. Fails loudly if it cannot run. |
 | [`demo-unsafe-deploy.yml`](.github/workflows/demo-unsafe-deploy.yml) | manual only, from `main`, typed confirmation | **Demonstration only.** Deploys an already-published broken image by digest through environment `demo-unsafe` (configure required reviewers). A red run is the expected result. |
+| [`pr-preview.yml`](.github/workflows/pr-preview.yml) | pull request events (labeled, unlabeled, synchronize, reopened, closed) | **Opt-in PR demos, NOT VERIFIED on GitHub or Render.** Only a PR from this repository (never a fork or Dependabot) that carries the label `preview` gets a Render image preview, built from the PR head, scanned with the same Trivy gate, pushed as `ghcr.io/<owner>/stockflow:pr-<n>` and `:pr-<n>-<sha7>`, and deployed **by digest** only after a green `quality-gate` for that head commit. See [PR demos](#pr-demos-optional-previews). |
 | [`perf.yml`](.github/workflows/perf.yml) | manual, typed `WRITE` confirmation | k6 against `STOCKFLOW_BASE_URL`; it writes products and orders on the target. |
 
 Properties: third-party actions pinned to full commit SHAs; top-level `permissions: contents: read` with write
@@ -284,6 +286,32 @@ That is deliberate: a release can never look green without a verified deployment
 `require_deploy` defaulting to true; setting it to false is the only opt-out and only warns. Bootstrap order:
 [docs/SETUP_GITHUB_RENDER.md](docs/SETUP_GITHUB_RENDER.md#4-bootstrap--first-push-and-first-release).
 (This behaviour comes from the workflow and scripts; it was not run on GitHub.)
+
+## PR demos (optional previews)
+
+**Status: written and unit-tested locally, NOT VERIFIED against GitHub or Render.** Nothing here has run on either.
+
+* **Opt-in per PR.** Add the repository label `preview` to a pull request. PRs from forks and from Dependabot
+  never get one; PRs without the label never get one.
+* **Gated.** The `pr-preview` workflow first waits for a green `quality-gate` check on the exact head commit.
+  Then it builds the linux/amd64 image from the PR head (no secrets in that job), runs the container smoke test and
+  image guards, applies the same Trivy image gate, pushes `ghcr.io/<owner>/stockflow:pr-<n>` and
+  `:pr-<n>-<sha7>`, and creates or redeploys a Render preview **by digest** through Render's API
+  (`POST /v1/services/{id}/preview`, base service = the production service). It then smoke-tests the preview with
+  `--expect-sha` set to the PR head commit.
+* **One sticky PR comment** shows the status and the preview URL (or why there is none, for example
+  `quality-gate FAILED for this commit`).
+* **Cleanup.** Closing the PR or removing the label deletes the preview. Render never deletes image previews by
+  itself; if the cleanup fails the comment names the service (`stockflow-pr-<n>`) to delete by hand.
+* **Needs** the `preview` environment with secrets `RENDER_API_KEY` and `RENDER_SERVICE_ID` (the base service
+  id) and optionally the variable `PREVIEW_PLAN`. A labelled PR on a repository without them fails with
+  `NOT DEPLOYED: preview not configured`. Setup: [docs/SETUP_GITHUB_RENDER.md](docs/SETUP_GITHUB_RENDER.md#8-optional-per-pr-preview-environments).
+* **Render-side facts not verified:** whether a free base service's previews can use the free plan, whether
+  `imagePath` accepts an `@sha256:` digest, how the preview URL is named, and that previews inherit the base
+  service's environment variables (so a preview's dashboard can say `production` as its environment).
+  A preview is a separate Render service with its own in-memory data.
+* Trade-off: this needs a Render API key, which is more powerful than the deploy hook. Read the risk notes in
+  the setup guide before enabling it.
 
 ## Deployment configuration
 

@@ -164,3 +164,31 @@ def test_policy_k6_args_use_the_variables_performance_js_reads(policy: dict[str,
     assert f"ERROR_RATE_MAX={policy['load_test']['error_rate_max']}" in joined
     assert "--vus" in args
     assert "--duration" in args
+
+
+# ------------------------------------------------------------------ job-level write permissions
+def test_write_permissions_are_allowed_only_for_the_reviewed_workflows(
+    policy: dict[str, Any],
+) -> None:
+    allowed = policy["actions"]["allowed_job_write_permissions"]
+    assert allowed == {
+        "packages": ["release.yml", "pr-preview.yml"],
+        "pull-requests": ["pr-preview.yml"],
+    }
+
+
+def test_a_new_write_permission_or_workflow_is_rejected() -> None:
+    tool = load_tool()
+    actions = yaml.safe_load(POLICY_FILE.read_text(encoding="utf-8"))["actions"]
+    workflow = (
+        "name: x\non: workflow_dispatch\npermissions:\n  contents: read\n"
+        "jobs:\n  j:\n    runs-on: ubuntu-24.04\n    permissions:\n      {perm}: write\n"
+        "    steps:\n      - run: echo ok\n"
+    )
+    assert tool.check_workflow("pr-preview.yml", workflow.format(perm="packages"), actions) == []
+    assert (
+        tool.check_workflow("pr-preview.yml", workflow.format(perm="pull-requests"), actions) == []
+    )
+    assert tool.check_workflow("release.yml", workflow.format(perm="pull-requests"), actions)
+    assert tool.check_workflow("ci.yml", workflow.format(perm="packages"), actions)
+    assert tool.check_workflow("pr-preview.yml", workflow.format(perm="contents"), actions)

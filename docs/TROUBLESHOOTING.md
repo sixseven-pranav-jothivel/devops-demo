@@ -14,7 +14,7 @@ get past a red gate (fix the code); never commit a `DEMO-DEFECT:` marker to `mai
 |---|---|---|
 | `uv: command not found`, `trivy`/`k6` not found | `~/.local/bin` is not on `PATH` (the Makefile exports it for its own recipes, your shell does not) | `export PATH=$HOME/.local/bin:$PATH`. Missing tools: `make tools` (pinned, checksum-verified trivy, actionlint, k6). |
 | `make sync` or `uv sync --frozen` fails: lockfile needs updating | `pyproject.toml` changed without `uv lock` | `uv lock`, commit `uv.lock`; `make lock-check` must pass. (seen: changing only `version = "0.1.0"` makes `uv lock --check` fail with `The lockfile at uv.lock needs to be updated`; `uv lock` prints `Updated stockflow v0.1.0 -> v0.1.1` and fixes it.) |
-| `make test` takes minutes | The suite is large (1322 tests incl. concurrency and demo-engine tests) and shares the CPU with whatever else runs | (seen: about 40 seconds alone, several minutes under load). Use `make test-unit` or a single file (`uv run pytest -q tests/unit`, under a second for pricing/validation tests) while iterating. |
+| `make test` takes minutes | The suite is large (1431 tests incl. concurrency and demo-engine tests) and shares the CPU with whatever else runs | (seen: about 40 seconds alone, several minutes under load). Use `make test-unit` or a single file (`uv run pytest -q tests/unit`, under a second for pricing/validation tests) while iterating. |
 | `make test-coverage` fails: `Required test coverage of ... not reached` | New code without tests (or the `bad_coverage` scenario is active) | Add tests. **Do not** change `coverage.fail_under` (policy floor; `make policy-check` fails on a downgrade). (seen with `bad_coverage`: `app/services/legacy_import.py ... 0%`, `Total coverage: 78.70%`.) |
 | `make lint` / `format-check` / `typecheck` fails after you edited | Ordinary findings | `uv run ruff check --fix .`, `make format` (applies `ruff format`; not itself a gate), fix mypy errors. |
 | `make policy-check` fails | A hard-coded threshold in `Makefile`/workflows/`scripts/deploy`, an unpinned action, a forbidden trigger, an expired or malformed ignore, a write permission outside the allowed job | Read the message; move the value into `config/quality-policy.yaml` (security owns it) or repin/remove the offending line. Never edit around the check. |
@@ -114,3 +114,24 @@ Render facts below come from Render's documentation (read 2026-10-10); behaviour
 | `make perf` ends `make: *** [Makefile:...: perf] Error 99` | k6 exit code 99: a threshold was crossed (seen with `slow_api`: `p(95)=765.73ms`) | Expected for the defect; otherwise investigate latency. Thresholds come from the policy (`load_test.*`). |
 | `make perf` has errors against Render | Free instance (small CPU) or cold start | Run against a local instance; `perf.yml` against Render is opt-in and writes data. |
 | k6: `setup failed: POST /api/products -> ...` | Target unreachable or the API changed | Check `BASE_URL`; the test creates its own product and deactivates it afterwards. |
+
+## 8. PR previews (pr-preview.yml)
+
+All **(from the code/docs)**; the feature was **NOT VERIFIED** on GitHub or Render. Render API facts come from
+the comments in `scripts/deploy/preview_lib.py` (Render's OpenAPI document and service-previews page).
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Labelled PR, `preview` job red: `NOT DEPLOYED: preview not configured` | Secrets `RENDER_API_KEY` and/or `RENDER_SERVICE_ID` missing from the `preview` environment | Create the environment and set both secrets ([SETUP 8](SETUP_GITHUB_RENDER.md#8-optional-per-pr-preview-environments)), then re-run failed jobs or push to the PR. |
+| Adding the label does nothing | PR is from a fork or from Dependabot (never eligible); the label is not exactly `preview`; PR does not target `main`; Actions disabled | Use a branch in this repository; check the label name; the sticky comment is absent for skipped PRs by design. |
+| Sticky comment says `No preview` / `quality-gate FAILED for this commit` | The gate for the head commit is red (for example a `demo/<scenario>` defect PR) | Fix the PR; the next push re-runs. A preview never deploys from a red gate. |
+| `gate` job times out | `quality-gate` never appeared or took more than the 25-minute wait | Check that `ci` ran for the head commit; push again. |
+| Comment says `No preview: image build, scan or publish failed` | The image build, the container smoke test or image guards, the Trivy image gate or the GHCR push failed | Open the `build-scan`/`publish` job logs; same causes as for the release image (sections 2, 3 and 5). |
+| `Preview deployment FAILED`, image published | Render API error: invalid key or service id, base service is not image-backed, plan not allowed, `imagePath` with `@sha256` digest rejected (unconfirmed), deploy not live in time | Read the `preview` job log (the key is masked). Set `PREVIEW_PLAN` if the plan is the issue. If the digest form is rejected, this needs a code change (report it); do not work around it with a mutable tag. |
+| Preview smoke test fails: `git_sha mismatch` | Old image still serving, or the deploy did not take the new digest | Wait for the retry window; check the preview's Events in Render. |
+| Preview dashboard says environment `production` | Previews copy the base service's settings including env vars (documented by Render; the app prints `DEPLOY_ENVIRONMENT`) | Expected; not a production deployment. |
+| Preview data differs from production / resets | Each preview is its own service with in-memory data | Expected. |
+| Comment says `Preview cleanup FAILED` | Cleanup job error (API key revoked, Render outage) | Delete the Render service `stockflow-pr-<n>` by hand in the dashboard; Render never deletes image previews itself. |
+| Previews pile up in Render | PRs closed while Actions was disabled, or cleanup failed | List services named `stockflow-pr-*` in Render and delete the ones whose PR is closed. |
+| Two runs fight for one PR | By design a newer update cancels the older run; `closed`/`unlabeled` runs never cancel and queue behind it | Wait. |
+| Preview runs for a PR but should not (trust) | The workflow file comes from the PR merge commit with `pull_request`, so anyone with write access can alter it | Restrict who can push branches; put required reviewers on the `preview` environment (SETUP 8). |

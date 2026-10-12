@@ -1,0 +1,355 @@
+name: pr-preview
+
+# Opt-in per-pull-request preview environments on Render (image previews). A PR gets a preview only if it
+# carries the label `preview`, comes from THIS repository (never a fork, never Dependabot) and its
+# `quality-gate` check is green for the exact head commit. Closing the PR or removing the label deletes it.
+#
+# Trust split (no pull_request_target anywhere):
+#   decide      reads the event, no secrets, no PR code        -> deploy | cleanup | skip (guard #2 in the script)
+#   gate        waits for the PR's quality-gate (checks: read)
+#   build-scan  checks out the PR head, NO secrets; build + run + smoke + Trivy gate -> tarball + sha256
+#   publish     packages: write, NO secrets; no PR code; sha256-verified tarball -> ghcr.io/<owner>/stockflow:pr-<n>
+#   preview     environment `preview` (RENDER_API_KEY, RENDER_SERVICE_ID); scripts from the TRUSTED base branch
+#               only; creates/redeploys the preview BY DIGEST, waits until live, smoke-tests it for the head sha
+#   cleanup     environment `preview`; `closed` ALWAYS runs it (deleting is idempotent), a missing preview is fine
+#   report      pull-requests: write, NO secrets; one sticky comment, every value sanitised
+# Residual risk: with `pull_request` the workflow file itself comes from the PR merge commit, so anyone with
+# write access can change it. Restrict who can push branches and use the deployment-branch / reviewer rules of
+# the `preview` environment (docs/SETUP_GITHUB_RENDER.md).
+#
+# Honesty: a labelled PR on a repository without RENDER_API_KEY / RENDER_SERVICE_ID FAILS with
+# "NOT DEPLOYED: preview not configured". Nothing here has been run against Render yet (NOT VERIFIED).
+
+on:
+  pull_request:
+    branches: [main]
+    types: [labeled, unlabeled, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+
+# Updates share one group per PR and cancel each other. `closed` / `unlabeled` runs (cleanup) have their OWN
+# group and never cancel anything, so no later update event can cancel a pending cleanup. An update that is
+# still running when a cleanup starts re-checks the PR (open? labelled? same head?) right before and right
+# after it deploys and removes its own preview if the PR went away (see `preview`).
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}${{ (github.event.action == 'closed' || github.event.action == 'unlabeled') && '-cleanup' || '' }}
+  cancel-in-progress: ${{ github.event.action != 'closed' && github.event.action != 'unlabeled' }}
+
+env:
+  UV_FROZEN: "1"
+  PYTHONUNBUFFERED: "1"
+  # The event, passed as data. Scripts read these; nothing is interpolated into a command line.
+  EVENT_ACTION: ${{ github.event.action }}
+  EVENT_LABEL: ${{ github.event.label.name }}
+  PR_NUMBER: ${{ github.event.pull_request.number }}
+  PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+  PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+  PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+  PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  decide:
+    name: decide
+    # Guard #1: same-repository, not Dependabot. (Guard #2 is preview_lib.decide in every privileged step.)
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      action: ${{ steps.decide.outputs.action }}
+    steps:
+      - name: Checkout the trusted base branch (scripts only, never the PR head)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+      - name: Decide
+        id: decide
+        run: python3 scripts/deploy/preview_tools.py decide
+
+  gate:
+    name: gate
+    needs: [decide]
+    if: needs.decide.outputs.action == 'deploy'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+      - name: Wait for a green quality-gate on this exact commit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/deploy/preview_tools.py wait-gate --timeout 1500 --interval 20
+
+  build-scan:
+    name: build-scan
+    needs: [decide, gate]
+    if: needs.decide.outputs.action == 'deploy'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      GIT_SHA: ${{ github.event.pull_request.head.sha }}
+      IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+      PREVIEW_IMAGE: stockflow:pr
+    outputs:
+      image_sha256: ${{ steps.tar.outputs.image_sha256 }}
+    steps:
+      - name: Checkout the PR head commit (this job has no secrets)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - uses: ./.github/actions/setup-trivy
+      - name: Build linux/amd64 (no push)
+        run: |
+          version="$(uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")"
+          APP_VERSION="${version}-pr${PR_NUMBER}" make docker-build IMAGE="$PREVIEW_IMAGE"
+      - name: Run the image, smoke test it, image guards, graceful stop
+        run: scripts/deploy/docker_test.sh "$PREVIEW_IMAGE" "$GIT_SHA"
+      - name: Save the exact image that will be scanned and published
+        id: tar
+        run: |
+          make docker-save IMAGE="$PREVIEW_IMAGE" SAVE_PLATFORM_FLAG=
+          echo "image_sha256=$(sha256sum reports/image.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Trivy image gate on the exact image (+ full non-blocking report)
+        run: make trivy-image-tar
+      - name: Job summary
+        if: always()
+        run: scripts/deploy/summarize.sh "Trivy image scan (PR image)" reports/trivy-image.txt 25
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reports-pr-preview-trivy-image
+          path: |
+            reports/trivy-image.txt
+            reports/trivy-image-full.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Hand the scanned image to the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-preview-image-tar
+          path: reports/image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  # packages: write, no secrets, and no PR code is executed: it loads the sha256-verified tarball that
+  # build-scan produced and pushes it. Scripts come from the trusted base branch.
+  publish:
+    name: publish
+    needs: [decide, build-scan]
+    if: >-
+      needs.decide.outputs.action == 'deploy' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      EXPECTED_TAR_SHA256: ${{ needs.build-scan.outputs.image_sha256 }}
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+      - name: Download the scanned image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pr-preview-image-tar
+          path: reports
+      - name: Verify the tarball is the one build-scan scanned (sha256), then load it
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$EXPECTED_TAR_SHA256" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "::error::build-scan did not report a valid image sha256"
+            exit 1
+          fi
+          echo "${EXPECTED_TAR_SHA256}  reports/image.tar" | sha256sum --check --strict -
+          docker load --input reports/image.tar
+      - name: Log in to GHCR with the job token
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag and push pr-<number> and pr-<number>-<sha7> (the preview is deployed by digest)
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="ghcr.io/${owner}/stockflow"
+          docker tag stockflow:pr "${repo}:pr-${PR_NUMBER}"
+          docker tag stockflow:pr "${repo}:pr-${PR_NUMBER}-${PR_HEAD_SHA:0:7}"
+          mkdir -p reports
+          docker push "${repo}:pr-${PR_NUMBER}-${PR_HEAD_SHA:0:7}" | tee reports/push-sha.txt
+          docker push "${repo}:pr-${PR_NUMBER}" | tee reports/push-pr.txt
+          echo "owner=${owner}" >> "$GITHUB_ENV"
+      - name: Capture the digest the registry reports
+        id: digest
+        run: |
+          set -euo pipefail
+          GITHUB_OUTPUT=/dev/null python3 scripts/deploy/release_tools.py push-digest reports/push-pr.txt > reports/digest-pr.env
+          python3 scripts/deploy/release_tools.py push-digest reports/push-sha.txt | tee reports/digest-sha.env
+          if ! diff reports/digest-sha.env reports/digest-pr.env; then
+            echo "::error::the two tags resolved to different digests"
+            exit 1
+          fi
+      - name: Build the deployable reference ghcr.io/<owner>/stockflow@sha256:<digest>
+        id: ref
+        env:
+          DIGEST: ${{ steps.digest.outputs.digest }}
+        run: python3 scripts/deploy/release_tools.py image-ref --owner "$owner" --digest "$DIGEST"
+      - name: Verify what the registry serves (labels must name the PR head commit)
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}
+        run: |
+          set -euo pipefail
+          python3 scripts/deploy/release_tools.py inspect --image "$IMAGE" --expect-owner "$owner" | tee reports/inspect.txt
+          grep -qx "git_sha=${PR_HEAD_SHA}" reports/inspect.txt
+
+  preview:
+    name: preview
+    needs: [decide, publish]
+    if: >-
+      needs.decide.outputs.action == 'deploy' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: preview
+    permissions:
+      contents: read
+      pull-requests: read # re-check that the PR is still open / labelled / unchanged
+    env:
+      IMAGE: ${{ needs.publish.outputs.image }}
+      # presence flags only; the secrets themselves reach just the deploy step
+      RENDER_KEY_PRESENT: ${{ secrets.RENDER_API_KEY != '' }}
+      RENDER_SERVICE_PRESENT: ${{ secrets.RENDER_SERVICE_ID != '' }}
+      PREVIEW_PLAN: ${{ vars.PREVIEW_PLAN }}
+    outputs:
+      configured: ${{ steps.preflight.outputs.configured }}
+      url: ${{ steps.deploy.outputs.url }}
+      superseded: ${{ steps.before.outputs.valid == 'false' || steps.after.outputs.valid == 'false' }}
+      superseded_reason: ${{ steps.before.outputs.reason || steps.after.outputs.reason }}
+    steps:
+      - name: Checkout the trusted base branch (never the PR head)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-python-env
+      - name: Is the preview environment configured? (fails when it is not)
+        id: preflight
+        run: python3 scripts/deploy/preview_tools.py preflight
+      - name: Load smoke settings from the policy
+        run: |
+          echo "SMOKE_TIMEOUT=$(uv run python scripts/quality_policy.py get smoke.timeout_seconds)" >> "$GITHUB_ENV"
+          echo "SMOKE_INTERVAL=$(uv run python scripts/quality_policy.py get smoke.poll_interval_seconds)" >> "$GITHUB_ENV"
+      - name: Re-check before deploying - PR still open, still labelled, head unchanged?
+        id: before
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/deploy/preview_tools.py recheck --phase before
+      - name: Create or redeploy the preview by digest and wait until THIS deploy is live
+        id: deploy
+        if: steps.before.outputs.valid == 'true'
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          python3 scripts/deploy/preview_tools.py deploy --image "$IMAGE" --expect-owner "$GITHUB_REPOSITORY_OWNER" \
+            --timeout "$SMOKE_TIMEOUT" --interval "$SMOKE_INTERVAL"
+      - name: Re-check after it went live - delete the preview if the PR was closed or unlabeled meanwhile
+        id: after
+        if: steps.before.outputs.valid == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: python3 scripts/deploy/preview_tools.py recheck --phase after
+      - name: Smoke test the preview - /api/version.git_sha == the PR head commit
+        if: steps.after.outputs.valid == 'true'
+        env:
+          PREVIEW_URL: ${{ steps.deploy.outputs.url }}
+        run: python3 scripts/smoke_test.py --base-url "$PREVIEW_URL" --expect-sha "$PR_HEAD_SHA" --timeout "$SMOKE_TIMEOUT"
+      - name: Upload preview record
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-preview-record
+          path: reports/preview-result.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  cleanup:
+    name: cleanup
+    needs: [decide]
+    if: >-
+      needs.decide.outputs.action == 'cleanup' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: preview
+    permissions:
+      contents: read
+    env:
+      RENDER_KEY_PRESENT: ${{ secrets.RENDER_API_KEY != '' }}
+      RENDER_SERVICE_PRESENT: ${{ secrets.RENDER_SERVICE_ID != '' }}
+    outputs:
+      deleted: ${{ steps.cleanup.outputs.deleted }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+      - name: Is the preview environment configured? (if not, no preview can exist)
+        id: preflight
+        run: python3 scripts/deploy/preview_tools.py preflight --optional
+      - name: Delete the preview (a missing one is fine)
+        id: cleanup
+        if: steps.preflight.outputs.configured == 'true'
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: python3 scripts/deploy/preview_tools.py cleanup
+
+  # The only job that can write to the pull request. No secrets, no PR code.
+  report:
+    name: report
+    needs: [decide, gate, build-scan, publish, preview, cleanup]
+    if: always() && needs.decide.result == 'success' && needs.decide.outputs.action != 'skip'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+      - name: Create or update the sticky comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/deploy/preview_tools.py comment

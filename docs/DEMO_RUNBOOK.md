@@ -699,6 +699,43 @@ Rollback impossible (`RENDER_DEPLOY_HOOK_URL`/`STOCKFLOW_BASE_URL` missing): con
 workaround that skips the check. Last resort: in the Render dashboard use manual deploy of the earlier image
 reference.
 
+### Optional stage P: per-PR preview environment (3 to 4 min, NOT VERIFIED)
+
+Only if `pr-preview.yml` has been set up and rehearsed ([SETUP_GITHUB_RENDER.md](SETUP_GITHUB_RENDER.md) section
+8). It is not one of the 14 stages and is not in the timeline totals; it fits after stage 7 or in the wrap-up.
+Nothing in it has been run on GitHub or Render; the descriptions come from the workflow and scripts.
+
+**Pre-stage** A same-repository branch `feature/preview-demo` with a trivial, legitimate change (for example the
+version bump from section 2.2 applied to a different branch) and a green PR. Create the label once. At T-30 add the
+`preview` label and let the preview deploy, so there is a real preview to show if the live one is slow. Do **not**
+use a `demo/<scenario>` branch: its `quality-gate` is red, so the preview correctly never deploys (show that as a
+bonus: the sticky comment reads `No preview` with `quality-gate FAILED for this commit`).
+
+**Do**
+
+1. Open (or show) the PR, add the label `preview` in the sidebar.
+2. Actions > `pr-preview`: walk the jobs `decide`, `gate` (waits for `quality-gate` on this exact commit),
+   `build-scan`, `publish` (tags `pr-<n>` and `pr-<n>-<sha7>`), `preview`, `report`.
+3. Open the sticky comment: status, commit, image digest, preview URL. Open the URL and `/api/version`.
+4. Close the PR (or remove the label). The `cleanup` run starts; the comment changes to `Preview deleted`; in
+   Render the service `stockflow-pr-<n>` is gone.
+
+**Expect** (not observed) comment headline `DEPLOYED and verified` with an `onrender.com` URL; the preview serves
+the PR head sha; the dashboard of the preview may still say environment `production` (previews inherit the base
+service's env vars; unconfirmed on Render) and its data is its own in-memory data, separate from production.
+**Failing job** None expected. Unconfigured: `preview` red with `NOT DEPLOYED: preview not configured`.
+**Say** "Same gates, same scanner, deployed by digest, only for a labelled same-repo PR, only after a green gate,
+and deleted when the PR closes. Render never deletes image previews itself, so the cleanup job exists."
+**If it goes wrong**
+
+| Symptom | Recovery |
+|---|---|
+| `NOT DEPLOYED: preview not configured` | Secrets missing from the `preview` environment: say so, show the pre-staged preview or skip the stage |
+| Preview takes too long or Render rejects it (plan, `@sha256` digest form, both unconfirmed) | Show the pre-staged result or the comment text; do not wait live; skip the stage |
+| `quality-gate FAILED` comment | Expected on a defect PR; use a green PR for the live demo |
+| `Preview cleanup FAILED` | The comment names `stockflow-pr-<n>`: delete it in the Render dashboard, say that Render never auto-deletes image previews |
+| Reviewer approval pending on `preview` | Approve the environment deployment |
+
 ## 6. Remaining scenario cards
 
 Same format; every command and output below was verified locally in a scratch copy and the tree restored with

@@ -90,7 +90,7 @@ flowchart LR
 |-- compose.yaml, render.yaml          devops (render.yaml is an optional Blueprint for the image-backed service)
 |-- .trivyignore                       security
 |-- .github/
-|   |-- workflows/                     devops: ci.yml, release.yml, rollback.yml, demo-unsafe-deploy.yml, perf.yml
+|   |-- workflows/                     devops: ci.yml, release.yml, rollback.yml, pr-preview.yml, demo-unsafe-deploy.yml, perf.yml, demo-fixtures.yml
 |   |-- actions/                       devops: setup-python-env, setup-trivy (local composite actions)
 |   `-- dependabot.yml                 devops
 |-- config/                            security: quality-policy.yaml, bandit.yaml, trivy.yaml
@@ -120,8 +120,8 @@ flowchart LR
 |-- scripts/
 |   |-- smoke_test.py                  qa (stdlib only)
 |   |-- quality_policy.py              security (get | args | check)
-|   `-- deploy/                        devops: deploy_render.py, deploy_lib.py, release_tools.py, docker_test.sh,
-|                                      image_guard.sh, install_tool.sh, summarize.sh
+|   `-- deploy/                        devops: deploy_render.py, deploy_lib.py, release_tools.py, preview_lib.py,
+|                                      preview_tools.py, docker_test.sh, image_guard.sh, install_tool.sh, summarize.sh
 `-- docs/
     |-- ARCHITECTURE.md, IMPLEMENTATION_STATUS.md   architect
     |-- SECURITY.md                    security
@@ -620,17 +620,19 @@ coverage and `--cov-fail-under` taken from the policy.
 | Invariants | `tests/invariants/` | rejected order mutates nothing; unit price captured; duplicate SKU incl. case variants; atomicity; **concurrency**: N threads against stock M, exactly M succeed |
 | Contract | `tests/test_contract.py`, `tests/test_quality_policy.py` | OpenAPI shape matches section 5; pyproject coverage mirror == policy |
 | Demo engine | `tests/demo/` | inject/reset/idempotency/refuse-on-edit/baseline-clean guard/runtime two-key gating |
-| Deploy helpers | `tests/deploy/` | `deploy_lib.py` and `release_tools.py` (image refs, digest parsing, gate logic, records) |
+| Deploy helpers | `tests/deploy/` | `deploy_lib.py` and `release_tools.py` (image refs, digest parsing, gate logic, records); `test_preview.py` for `preview_lib.py` / `preview_tools.py` (eligibility decision, gate state, create/redeploy/cleanup against a fake Render, URL validation, comment rendering) |
 | Smoke | `scripts/smoke_test.py` (+ `tests/test_smoke_script.py`) | stdlib-only post-deploy checks (`/health`, `/ready`, `/api/version` sha, `/api/products`, one order round trip, `/`); exit 0/1/2 |
 | Load | `load-tests/performance.js`, `smoke.js` | k6; `setup()` creates a high-stock product; thresholds from policy (`p95`, error rate) |
 
 Hermetic: no network, no shared state, SQLite in `tmp_path`, frozen clock where time is asserted.
 Coverage `source=app` only, branch coverage, `fail_under = 85` (policy-mirrored).
 
-Measured on 2026-10-11 (this repository, `uv run pytest -q --cov`): **1322 passed** in 69 s, branch coverage
-**100.00 %** over 849 statements / 104 branches. Marker counts from `pytest --collect-only -m <marker>`:
-unit 362, integration 843 (of which concurrency 18), demo 117; 362 + 843 + 117 = 1322, i.e. every test carries
-exactly one of unit / integration / demo.
+Measured on 2026-10-11 (`uv run pytest -q --collect-only`): **1431 tests**: unit 469, integration 845 (of
+which concurrency 18), demo 117; 469 + 845 + 117 = 1431, i.e. every test carries exactly one of unit /
+integration / demo. Last full run with coverage: 1399 passed, **2 failed**
+(`tests/test_quality_policy.py::test_the_policy_check_is_clean_on_the_repository` and
+`::test_cli_check_exit_code_is_zero_on_the_repository`, because the policy rejects the permissions of
+`pr-preview.yml`, see 10.5); branch coverage 100.00 % over 849 statements / 104 branches.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -693,6 +695,42 @@ workflow; the only write permission (`packages: write`) is at job level in `rele
   reading version/git sha from OCI labels; `rollback` (`environment: production`) redeploys that digest with
   the same script and smoke-checks `/api/version.git_sha == restored image's sha`. Nothing is rebuilt. A
   rollback that cannot run (hook or base URL missing) **fails**. Same `deploy-production` concurrency group.
+- **pr-preview.yml** - opt-in per-pull-request Render **image preview**. Trigger `pull_request` (main;
+  types labeled, unlabeled, synchronize, reopened, closed); never `pull_request_target`. A PR gets a preview
+  only if it carries the label **`preview`**, comes from **this repository** (never a fork, never Dependabot)
+  and its `quality-gate` check is **green for the exact head SHA**. Jobs: `decide` -> `gate` ->
+  `build-scan` -> `publish` -> `preview`; `cleanup` and `report` as below. Concurrency
+  `pr-preview-<number>`: an update cancels the previous update, but `closed`/`unlabeled` never cancel and
+  queue behind a running one. Trust split in 10.5.
+  1. `decide` (no secrets, scripts from the base branch): job-level `if` (same repo, not Dependabot) plus the
+     script guard `preview_lib.decide` -> `deploy` | `cleanup` | `skip`. `labeled` with `preview`,
+     `synchronize`/`reopened` with the label already set -> deploy; `unlabeled` of `preview`, or `closed` while
+     the PR carries the label -> cleanup; anything else -> skip. Deny by default; the event reaches scripts only through environment
+     variables.
+  2. `gate` (`checks: read`): `preview_tools.py wait-gate` polls the check runs of `PR_HEAD_SHA` until the
+     `quality-gate` run concludes (timeout 1500 s); not green means no preview.
+  3. `build-scan`: checks out the **PR head**, **no secrets**; builds linux/amd64 (`APP_VERSION` =
+     `<version>-pr<n>`), `docker_test.sh`, saves the tarball and publishes its sha256 as a job output, Trivy
+     gate on the tarball (same policy as release), uploads `pr-preview-image-tar`.
+  4. `publish` (`packages: write`, **no secrets, no PR code**; scripts from the base branch): verifies the
+     tarball sha256, `docker load`, pushes `ghcr.io/<owner>/stockflow:pr-<n>` and `:pr-<n>-<sha7>`, parses the
+     digest from the push output (both tags must agree), checks the registry's OCI `git_sha` label equals
+     the PR head sha. The preview is deployed **by digest**, never by tag.
+  5. `preview` (`environment: preview`, secrets `RENDER_API_KEY` + `RENDER_SERVICE_ID`, optional variable
+     `PREVIEW_PLAN`; scripts from the **base branch only**): `preview_tools.py preflight` (fails if the
+     secrets are missing: "NOT DEPLOYED: preview not configured"), then `preview_tools.py deploy`: look up
+     the service named `stockflow-pr-<n>`; if absent create it with `POST /v1/services/{id}/preview`
+     (`imagePath` = the digest reference, `name`, optional `plan`), else redeploy it with
+     `POST /v1/services/{id}/deploys {"imageUrl": ...}`; poll until **this** deploy (not an older one) is
+     `live` and its image contains the digest; validate the reported URL (`https://<name>.onrender.com`);
+     then `scripts/smoke_test.py --expect-sha <PR head sha>`. Uploads `pr-preview-record`.
+  6. `cleanup` (`environment: preview`): on `closed` or label removal, `preview_tools.py cleanup` deletes
+     the preview service (`DELETE /v1/services/{id}`); a missing preview is fine, and an unconfigured
+     environment is tolerated (`preflight --optional`). **Render never deletes image previews by itself**, so
+     this job is the only thing that stops billing for abandoned previews.
+  7. `report` (`pull-requests: write`, **no secrets, no PR code**): one sticky comment (marker
+     `<!-- stockflow-preview -->`) built by `preview_tools.py comment` from the `needs` results; every value
+     is sanitised before it reaches Markdown.
 - **demo-unsafe-deploy.yml** - DEMONSTRATION ONLY. `workflow_dispatch`, main only, typed confirmation
   `DEPLOY-BROKEN-IMAGE`, `environment: demo-unsafe` (configure required reviewers), deploys an
   already-published image by digest (it builds nothing) to show Render's behaviour (new instance must pass
@@ -705,8 +743,50 @@ workflow; the only write permission (`packages: write`) is at job level in `rele
 - Secrets and variables: `RENDER_DEPLOY_HOOK_URL` (secret, `production` and `demo-unsafe` environments),
   optional `RENDER_API_KEY` / `RENDER_SERVICE_ID`, variable `STOCKFLOW_BASE_URL`. GHCR uses `GITHUB_TOKEN`.
   The GHCR package must be public (or Render needs registry credentials).
+- Preview-only configuration: environment `preview` holding `RENDER_API_KEY` and `RENDER_SERVICE_ID` (the
+  production base service; previews copy it), optional variable `PREVIEW_PLAN`. Restrict the environment with
+  deployment-branch and reviewer rules.
 - **Not verified yet**: nothing in this section has run on GitHub or Render (no remote, no credentials);
   see `docs/IMPLEMENTATION_STATUS.md`.
+
+Render points that are **UNCONFIRMED** for previews (the code fails loudly rather than assuming; all NOT
+VERIFIED against a real account):
+1. Whether an image preview of a **Free**-plan base service may itself be Free. Render only documents that a
+   paid base cannot have Free previews and that image previews are billed by the plan in the request. Hence
+   `PREVIEW_PLAN` is optional and unset (omitted = the base service's plan). Check cost before enabling.
+2. Whether `imagePath` accepts the `repo@sha256:<digest>` form. The API text says only "tag or SHA" must
+   differ from the base image; the deploy hook (which the production pipeline already uses) has the same
+   rule. The workflow's digest-based create depends on this.
+3. The preview URL shape. Documented: previews get their own `onrender.com` URL. The script accepts only
+   `https://<name>.onrender.com` with no path/port and refuses anything else, so a different real shape would
+   make the job fail rather than smoke-test an unknown host.
+4. Inherited environment: previews copy the base service's settings including env vars, so a preview reports
+   `DEPLOY_ENVIRONMENT=production` (and, in-memory, starts with seed data). Whether other inherited env vars
+   or secrets are acceptable for PR code must be reviewed; PR code does run on Render with that config.
+5. Redeploying an existing preview by `imageUrl` requires the host/repository/image name to match the
+   configured image; the PR-number tags satisfy that, but this is untested.
+
+### 10.5 Trust boundaries of pr-preview.yml
+PR code is untrusted; privileges are split across jobs so no job has both PR code and a secret or write token:
+
+| Job | Runs PR code | Secrets | Token permissions | Scripts from |
+|---|---|---|---|---|
+| `decide` | no | none | `contents: read` | base branch |
+| `gate` | no | none (`GITHUB_TOKEN`) | `checks: read` | base branch |
+| `build-scan` | **yes** (head checkout: Docker build, tests in container, Trivy) | **none** | `contents: read` | PR head |
+| `publish` | no (loads the sha256-verified tarball) | none (`GITHUB_TOKEN`) | `packages: write` | base branch |
+| `preview`, `cleanup` | no | `RENDER_API_KEY`, `RENDER_SERVICE_ID` (environment `preview`) | `contents: read` | base branch |
+| `report` | no | none (`GITHUB_TOKEN`) | `pull-requests: write` | base branch |
+
+Controls: no `pull_request_target`; same-repository PRs only; Dependabot excluded; label opt-in; gate on the
+head SHA; the secrets are readable only by jobs that declare `environment: preview`; values from the event
+pass through environment variables, never command lines. Residual risk (stated in the workflow header): with
+`pull_request` the workflow file itself comes from the PR merge commit, so anyone with write access can change
+it. Mitigate by restricting who can push branches and by deployment-branch/reviewer rules on `preview`.
+Policy note: `pr-preview.yml` needs `packages: write` (publish) and `pull-requests: write` (report); the
+quality policy currently allows `packages: write` only in `release.yml` and `pull-requests` nowhere, so
+`make policy-check` fails until security extends `actions.allowed_job_write_permissions` (see
+`docs/IMPLEMENTATION_STATUS.md`).
 
 ### 10.2 Image (`Dockerfile`, devops)
 Multi-stage: `uv` binary stage (pinned version + digest), `base` (`python:3.12-slim@sha256:...`, the single

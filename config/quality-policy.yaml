@@ -91,8 +91,12 @@ actions:
   # Which workflow files may hold each WRITE permission, at JOB level only (never top level).
   # Any write permission not listed here (or in a file not listed) fails `check`.
   allowed_job_write_permissions:
-    packages: [release.yml]    # push image to GHCR
-    # contents / id-token / pull-requests / actions / security-events: none allowed
+    # release.yml `publish`: pushes the scanned release image. pr-preview.yml `publish`: pushes the
+    # sha256-verified PR image as pr-<n> tags; it holds no secrets and runs no PR code (docs/SECURITY.md 2, T15).
+    packages: [release.yml, pr-preview.yml]
+    # pr-preview.yml `report`: the single sticky PR comment. No secrets, no PR code, every value sanitised.
+    pull-requests: [pr-preview.yml]
+    # contents / id-token / actions / security-events: none allowed
   forbid_continue_on_error: true   # no `continue-on-error: true` anywhere in .github/workflows
   # Any `secrets.X` other than GITHUB_TOKEN may only be read by a job that declares `environment:`
   # (so the secret lives in an environment, can be gated by reviewers and branch rules).

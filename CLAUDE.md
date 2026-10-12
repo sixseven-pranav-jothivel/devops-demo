@@ -33,7 +33,12 @@ smoke test -> deployment record -> manual rollback by digest. k6 for load tests.
   medium/medium, trivy fs strict, trivy image `ignore_unfixed: true` per docs/SECURITY.md 7.2, ...).
   Read it with `uv run python scripts/quality_policy.py get|args|check`.
 - Workflows (`.github/workflows/`): `ci.yml` (jobs roll up into the required `quality-gate`), `release.yml`
-  (`ci` -> `build-scan` -> `publish` -> `deploy`), `rollback.yml`, `demo-unsafe-deploy.yml`, `perf.yml`.
+  (`ci` -> `build-scan` -> `publish` -> `deploy`), `rollback.yml`, `pr-preview.yml`, `demo-unsafe-deploy.yml`, `perf.yml`.
+  `pr-preview.yml` (opt-in via the `preview` label, same-repo PRs only, gated on a green `quality-gate` for the
+  head SHA) creates a per-PR Render image preview by digest and deletes it on close/unlabel. Trust split:
+  `build-scan` runs PR code with no secrets; `publish` has `packages: write` and loads a sha256-verified
+  tarball; `preview`/`cleanup` hold the Render secrets (environment `preview`) and run base-branch scripts
+  only; `report` has `pull-requests: write`. Everything Render/GitHub-side is NOT VERIFIED.
   A push to main REQUIRES a verified deployment: missing `RENDER_DEPLOY_HOOK_URL` / `vars.STOCKFLOW_BASE_URL`
   fails the `deploy` job (the image is still published to GHCR first). Manual runs default `require_deploy: true`.
   `deployment-record.json` says `deployed: true` only after Render, the smoke test and `verify-deployment` all passed.

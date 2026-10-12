@@ -309,9 +309,87 @@ smoke test or `perf.yml` while the audience is looking at product data you care 
   automatic repository link of a package published with the `org.opencontainers.image.source` label; PAT-only
   authentication for `docker login ghcr.io`. These are stated from GitHub's documentation or general knowledge,
   not observed.
+* PR previews (section 8): whether a preview of a **free** base service may itself use the free plan; whether
+  Render's preview API accepts an `imagePath` in the `repo@sha256:<digest>` form (its documentation says only
+  that the tag or SHA may vary); how preview URLs are named; and that previews inherit the base service's
+  environment variables (documented by Render; implies a preview can report `DEPLOY_ENVIRONMENT=production`).
 * Everything in sections 1, 3 and 4 as a live sequence: no GitHub repository setting, GHCR package, Render
   service, hook call or environment approval was exercised.
 
 Sources (read 2026-10-10): Render docs on deploying an image (`render.com/docs/deploy-an-image`), deploy hooks
 (`render.com/docs/deploy-hooks`), health checks (`render.com/docs/health-checks`) and free instances
 (`render.com/docs/free`); GitHub docs on configuring a package's access control and visibility.
+
+## 8. Optional: per-PR preview environments
+
+**NOT VERIFIED.** The workflow [`pr-preview.yml`](../.github/workflows/pr-preview.yml) and its scripts
+(`scripts/deploy/preview_tools.py`, `preview_lib.py`) are covered by local unit tests only; nothing has run against
+GitHub or Render. Skip this whole section if you do not want previews; nothing else depends on it.
+
+### 8.1 What it does
+
+A pull request that (a) comes from a branch in **this** repository (never a fork, never Dependabot) and (b)
+carries the label `preview` gets a Render **image preview** of the production service:
+
+1. `decide` (no secrets, no PR code) reads the event and picks `deploy`, `cleanup` or `skip`.
+2. `gate` waits (up to 25 minutes) for a green `quality-gate` check run on the PR's exact head commit.
+3. `build-scan` checks out the PR head (no secrets), builds linux/amd64, runs the container smoke test and
+   image guards, applies the Trivy image gate, and saves the tarball with its sha256.
+4. `publish` (`packages: write`, no secrets, no PR code) verifies the tarball, pushes
+   `ghcr.io/<owner>/stockflow:pr-<n>` and `:pr-<n>-<sha7>`, checks both resolve to one digest and that the OCI labels
+   name the head commit.
+5. `preview` (environment `preview`; scripts from the trusted base branch) creates the preview with
+   `POST /v1/services/{id}/preview` (base service = `RENDER_SERVICE_ID`) **by digest**, or redeploys it on later
+   pushes, waits until that deploy is live, and smoke-tests it with `--expect-sha` = the PR head commit.
+6. `report` writes one sticky PR comment with status and URL.
+7. On PR close or when the label is removed, `cleanup` deletes the preview service (`stockflow-pr-<n>`); a missing
+   one is fine. Render never deletes image previews by itself; if cleanup fails the comment names the service so
+   you can delete it manually.
+
+A labelled PR on a repository where the secrets are missing fails with **`NOT DEPLOYED: preview not configured`**.
+A PR with a red `quality-gate` gets the comment "No preview" instead of a deployment.
+
+### 8.2 Set it up
+
+1. **Create the label** (exact name `preview`):
+   `gh label create preview --description "Deploy a Render preview for this PR" --color 1d76db --repo sixseven-pranav-jothivel/devops-demo`
+   (or Issues > Labels > New label). Not run here.
+2. **Create the environment** `preview`: Settings > Environments > New environment. Strongly recommended: add
+   **required reviewers**. The workflow header documents the residual risk: with a `pull_request` trigger the
+   workflow file itself comes from the PR merge commit, so anyone who can push a branch to this repository can
+   alter it, and the `preview` environment is what holds the Render API key. Reviewers on the environment make a
+   human approve each job that can read the key; also restrict who has write access.
+3. **Set the secrets** on that environment (the values are never echoed; paste at the prompt):
+   ```bash
+   gh secret set RENDER_API_KEY    --env preview --repo sixseven-pranav-jothivel/devops-demo
+   gh secret set RENDER_SERVICE_ID --env preview --repo sixseven-pranav-jothivel/devops-demo   # srv-... of the BASE (production) service
+   ```
+   Optional variable (leave unset unless Render rejects the default plan):
+   `gh variable set PREVIEW_PLAN --env preview --body <plan> --repo sixseven-pranav-jothivel/devops-demo`.
+   `RENDER_SERVICE_ID` must be an image-backed service whose image URL is `ghcr.io/sixseven-pranav-jothivel/stockflow`
+   (the production service from section 3). Render's rule is that a preview's image path may differ only in tag or
+   digest.
+4. **API key risk.** Unlike the deploy hook, which can only redeploy one service, a Render API key is an account
+   credential: the script uses it to create and delete services (previews), and a leaked key can do whatever the
+   key's owner can (the exact scope of a Render API key was not looked up here; check Render's current
+   documentation and use the least-privileged account or workspace you can). Keep it only in the `preview`
+   environment secret (not repository secrets), rotate it after demos, and revoke it if the repository's write
+   access list changes. The same `RENDER_API_KEY` secret name in the `production` environment is a separate,
+   optional secret used only to poll deploy status.
+5. **GHCR**: the preview tags go into the same public package; Render pulls the digest anonymously.
+6. **Cost and plan.** Each preview is an extra Render service billed by plan. Whether a preview of a free base
+   service can be on the free plan is **not confirmed**; Render documents that previews of a base service on a
+   paid plan cannot use the free plan. If creation fails on the plan, set `PREVIEW_PLAN`.
+
+### 8.3 How to try it (NOT VERIFIED; do it once before relying on it)
+
+1. Push a branch from this repository with a trivial change and open a PR into `main`.
+2. Add the `preview` label. The `pr-preview` run starts; wait for `quality-gate`, then the build, publish and
+   `preview` jobs. With no secrets yet configured this ends in `NOT DEPLOYED: preview not configured`: that is the
+   expected unconfigured result.
+3. After configuring the secrets, re-run failed jobs: the sticky comment should show `DEPLOYED and verified`, the
+   commit, the image digest and a preview URL (an `onrender.com` address; the URL naming is unconfirmed). Open it
+   and check `/api/version` shows the PR head sha.
+4. Push another commit: the same preview is redeployed to the new digest.
+5. Remove the label or close the PR: `cleanup` runs, the comment says `Preview deleted`, and the service
+   `stockflow-pr-<n>` disappears from the Render dashboard (what to expect, not observed).

@@ -254,6 +254,14 @@ class RenderDeploy:
     image_sha: str | None
 
 
+class RenderHttpError(DeployError):
+    """The Render API answered with an HTTP error status (``code``)."""
+
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class RenderApi:
     """Read-only client for the documented deploy endpoints (needs RENDER_API_KEY + service id)."""
 
@@ -264,20 +272,45 @@ class RenderApi:
         self._service = service_id
         self._opener = opener
 
-    def _get(self, path: str) -> Any:
-        request = urllib.request.Request(f"{RENDER_API}{path}", method="GET")
+    @property
+    def opener(self) -> Opener:
+        """The HTTP transport (injectable for tests); lets a second client reuse it."""
+        return self._opener
+
+    def _request(self, method: str, path: str, body: Mapping[str, Any] | None = None) -> Any:
+        """One authenticated JSON call to the Render API. Returns the parsed body (``None`` if empty).
+
+        Never follows redirects (see ``default_opener``) and never puts the key in an error message.
+        """
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        where = f"{method} {path.split('?', maxsplit=1)[0]}"  # never log the query string
+        request = urllib.request.Request(f"{RENDER_API}{path}", data=data, method=method)
         request.add_header("Authorization", f"Bearer {self._key}")
         request.add_header("Accept", "application/json")
         request.add_header("User-Agent", "stockflow-deploy/1")
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
         try:
             with self._opener(request, timeout=30.0) as response:
-                return json.loads(response.read().decode("utf-8"))
+                raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
-            raise DeployError(f"Render API {path} answered HTTP {exc.code}") from None
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-            raise DeployError(
-                f"Render API {path} failed: {redact(str(getattr(exc, 'reason', exc)), [self._key])}"
+            raise RenderHttpError(
+                f"Render API {where} answered HTTP {exc.code}", exc.code
             ) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise DeployError(
+                f"Render API {where} failed: "
+                f"{redact(str(getattr(exc, 'reason', exc)), [self._key])}"
+            ) from None
+        if not raw.strip():
+            return None
+        try:
+            return json.loads(raw)
+        except ValueError:
+            raise DeployError(f"Render API {where} returned a body that is not JSON") from None
+
+    def _get(self, path: str) -> Any:
+        return self._request("GET", path)
 
     @staticmethod
     def _parse(item: Any) -> RenderDeploy | None:
