@@ -95,7 +95,7 @@ jobs:
         run: make test-unit
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reports-unit-tests
           path: reports/junit-unit.xml
@@ -115,7 +115,7 @@ jobs:
         run: make test-integration
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reports-integration-tests
           path: reports/junit-integration.xml
@@ -138,7 +138,7 @@ jobs:
         run: scripts/deploy/summarize.sh "Coverage" reports/pytest-coverage.txt 60
       - name: Upload coverage and test reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reports-coverage
           path: |
@@ -164,7 +164,7 @@ jobs:
         run: scripts/deploy/summarize.sh "Bandit" reports/bandit.txt 30
       - name: Upload bandit report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reports-bandit
           path: reports/bandit.txt
@@ -187,7 +187,7 @@ jobs:
         run: scripts/deploy/summarize.sh "pip-audit" reports/pip-audit.txt 30
       - name: Upload pip-audit report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reports-pip-audit
           path: reports/pip-audit.txt
@@ -215,7 +215,7 @@ jobs:
           scripts/deploy/summarize.sh "Trivy config scan" reports/trivy-config.txt 25
       - name: Upload trivy reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reports-trivy-fs
           path: |
@@ -250,7 +250,7 @@ jobs:
             docker image inspect stockflow:local --format '- size: {{.Size}} bytes, user: {{.Config.User}}' 2>/dev/null || echo "- image not available"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload image for the scan job
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-tar
           path: reports/image.tar
@@ -269,7 +269,7 @@ jobs:
       - uses: ./.github/actions/setup-python-env
       - uses: ./.github/actions/setup-trivy
       - name: Download the tested image
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: image-tar
           path: reports
@@ -280,7 +280,7 @@ jobs:
         run: scripts/deploy/summarize.sh "Trivy image scan" reports/trivy-image.txt 25
       - name: Upload trivy image reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reports-trivy-image
           path: |
