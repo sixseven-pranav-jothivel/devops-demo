@@ -77,7 +77,7 @@ were produced by the orchestrator's headless-Chromium session.
 
 ## Local setup
 
-Requirements: [uv](https://docs.astral.sh/uv/) (CI pins 0.12.24), `make`, and for the optional parts Docker,
+Requirements: [uv](https://docs.astral.sh/uv/) (CI and the image pin 0.13.0), `make`, and for the optional parts Docker,
 [Trivy](https://trivy.dev/), [k6](https://k6.io/) and `actionlint` (`make tools` installs pinned,
 checksum-verified copies of trivy, actionlint and k6 into `~/.local/bin`). uv uses the Python 3.12 pinned by
 `.python-version`.
