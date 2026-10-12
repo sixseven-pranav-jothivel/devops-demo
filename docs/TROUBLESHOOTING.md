@@ -136,3 +136,5 @@ The label-then-close path was observed on GitHub and Render on 2026-10-12 (PR #3
 | Previews pile up in Render | PRs closed while Actions was disabled, or cleanup failed | List services named `stockflow-pr-*` in Render and delete the ones whose PR is closed. |
 | Two runs fight for one PR | By design a newer update cancels the older run; `closed`/`unlabeled` runs never cancel and queue behind it | Wait. |
 | Preview runs for a PR but should not (trust) | The workflow file comes from the PR merge commit with `pull_request`, so anyone with write access can alter it | Restrict who can push branches; put required reviewers on the `preview` environment (SETUP 8). |
+
+<!-- env label test -->
