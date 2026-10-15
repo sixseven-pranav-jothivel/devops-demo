@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess  # DEMO-DEFECT:bad_security
 from decimal import Decimal
 
 from app.models.domain import Metrics
@@ -25,3 +26,8 @@ def compute_metrics(repo: Repository, *, low_stock_threshold: int) -> Metrics:
         revenue_total=pricing.quantize_money(revenue),
         low_stock_threshold=low_stock_threshold,
     )
+
+
+def revision_label(ref: str) -> str:  # DEMO-DEFECT:bad_security
+    """Resolve a git ref to a short revision label (shell built from caller input)."""
+    return subprocess.check_output(f"git rev-parse --short {ref}", shell=True, text=True).strip()
