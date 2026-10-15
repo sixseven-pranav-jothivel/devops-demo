@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os  # DEMO-DEFECT:bad_lint
 from decimal import Decimal
 
 from app.models.domain import Order
