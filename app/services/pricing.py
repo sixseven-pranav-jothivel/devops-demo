@@ -54,7 +54,7 @@ def calculate_tax(taxable_amount: Decimal, tax_rate: Decimal) -> Decimal:
 
 
 def calculate_total(subtotal: Decimal, discount: Decimal, tax: Decimal) -> Decimal:
-    return subtotal - discount + tax
+    return subtotal + tax  # DEMO-DEFECT:bad_unit_test
 
 
 def price_order(line_totals: Iterable[Decimal], tax_rate: Decimal) -> OrderTotals:
