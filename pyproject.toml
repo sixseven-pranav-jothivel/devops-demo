@@ -1,6 +1,6 @@
 [project]
 name = "stockflow"
-version = "0.1.0"
+version = "0.1.1"
 description = "StockFlow: small FastAPI inventory/order app used to demonstrate a complete CI/CD and DevOps lifecycle."
 readme = "README.md"
 requires-python = ">=3.12"
