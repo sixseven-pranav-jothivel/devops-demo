@@ -8,7 +8,7 @@
 # Build args are metadata only. Never pass a secret as ARG/ENV.
 
 # -- uv binary (pinned version + digest of the multi-arch index) ---------------------------------------
-FROM ghcr.io/astral-sh/uv:0.13.0@sha256:cdc6093146eb3ff6a40107b38f008b789e050e77ad87865e381d9917da55a168 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.2@sha256:b9fddcde095a7aeafd499024adb8927df6619c7c5672f5ff7126474715f62ba4 AS uv
 
 # -- BASE IMAGE: the single line the demo `bad_container` scenario patches ------------------
 FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS base
