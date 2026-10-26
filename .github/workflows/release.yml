@@ -147,7 +147,7 @@ jobs:
           echo "${EXPECTED_TAR_SHA256}  reports/image.tar" | sha256sum --check --strict -
           docker load --input reports/image.tar
       - name: Log in to GHCR with the job token
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
